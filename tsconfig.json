@@ -1,9 +1,8 @@
 {
   "compilerOptions": {
-    "target": "es2022",
-    "module": "nodenext",
-    "moduleResolution": "nodenext",
-    "rootDir": "./src",
+    "target": "es2023",
+    "module": "esnext",
+    "moduleResolution": "bundler",
     "outDir": "./dist",
     "baseUrl": ".",
     "paths": {
@@ -18,6 +17,7 @@
     "ignoreDeprecations": "6.0",
   },
   "include": [
-    "src"
+    "src",
+    "generated"
   ]
 }

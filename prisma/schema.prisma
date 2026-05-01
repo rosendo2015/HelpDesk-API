@@ -1,0 +1,116 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// ----------------------
+/// MODELOS DE USUÁRIOS
+/// ----------------------
+
+model Admin {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  services  Service[]
+  chamados  Chamado[]
+}
+
+model Tecnico {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  disponibilidade Disponibilidade[]
+  chamados        Chamado[]
+}
+
+model Cliente {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  chamados  Chamado[]
+}
+
+/// ----------------------
+/// MODELOS DE NEGÓCIO
+/// ----------------------
+
+model Service {
+  id        String   @id @default(uuid())
+  name      String
+  price     Float     // Prisma aceita Float nativamente
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  adminId   String
+  admin     Admin     @relation(fields: [adminId], references: [id])
+  chamados ChamadoService[]
+}
+
+model Chamado {
+  id        String   @id @default(uuid())
+  status    Status   @default(ABERTO)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  adminId   String
+  admin     Admin    @relation(fields: [adminId], references: [id])
+
+  clienteId String
+  cliente   Cliente  @relation(fields: [clienteId], references: [id])
+
+  tecnicoId String
+  tecnico   Tecnico  @relation(fields: [tecnicoId], references: [id])
+
+  services  ChamadoService[]
+}
+
+model ChamadoService {
+  id        String   @id @default(uuid())
+  chamadoId String
+  serviceId String
+
+  chamado   Chamado  @relation(fields: [chamadoId], references: [id])
+  service   Service  @relation(fields: [serviceId], references: [id])
+}
+
+/// ----------------------
+/// MODELOS AUXILIARES
+/// ----------------------
+
+model Disponibilidade {
+  id        String   @id @default(uuid())
+  tecnicoId String
+  horario   String
+
+  tecnico   Tecnico  @relation(fields: [tecnicoId], references: [id])
+}
+
+enum Status {
+  ABERTO
+  EM_ATENDIMENTO
+  ENCERRADO
+}
