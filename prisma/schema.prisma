@@ -1,8 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -13,44 +8,32 @@ datasource db {
 }
 
 /// ----------------------
-/// MODELOS DE USUÁRIOS
+/// MODELO DE USUÁRIOS
 /// ----------------------
 
-model Admin {
-  id        String   @id @default(uuid())
-  name      String
-  email     String   @unique
-  password  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  services  Service[]
-  chamados  Chamado[]
-}
-
-model Tecnico {
+model User {
   id        String   @id @default(uuid())
   name      String
   email     String   @unique
   password  String
   avatarUrl String?
+  role      Role
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  disponibilidade Disponibilidade[]
-  chamados        Chamado[]
+  // Relações inversas
+  chamadosAdmin   Chamado[] @relation("ChamadosAdmin")
+  chamadosCliente Chamado[] @relation("ChamadosCliente")
+  chamadosTecnico Chamado[] @relation("ChamadosTecnico")
+
+  services         Service[]         @relation("ServicesByAdmin")
+  disponibilidades Disponibilidade[] @relation("DisponibilidadesDoTecnico")
 }
 
-model Cliente {
-  id        String   @id @default(uuid())
-  name      String
-  email     String   @unique
-  password  String
-  avatarUrl String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  chamados  Chamado[]
+enum Role {
+  ADMIN
+  TECNICO
+  CLIENTE
 }
 
 /// ----------------------
@@ -60,13 +43,13 @@ model Cliente {
 model Service {
   id        String   @id @default(uuid())
   name      String
-  price     Float     // Prisma aceita Float nativamente
-  active    Boolean   @default(true)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  price     Float
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  adminId   String
-  admin     Admin     @relation(fields: [adminId], references: [id])
+  adminId  String
+  admin    User             @relation("ServicesByAdmin", fields: [adminId], references: [id])
   chamados ChamadoService[]
 }
 
@@ -75,26 +58,27 @@ model Chamado {
   status    Status   @default(ABERTO)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  
-  adminId   String
-  admin     Admin    @relation(fields: [adminId], references: [id])
+
+  adminId String
+  admin   User   @relation("ChamadosAdmin", fields: [adminId], references: [id])
 
   clienteId String
-  cliente   Cliente  @relation(fields: [clienteId], references: [id])
+  cliente   User   @relation("ChamadosCliente", fields: [clienteId], references: [id], onDelete: Cascade)
 
   tecnicoId String
-  tecnico   Tecnico  @relation(fields: [tecnicoId], references: [id])
+  tecnico   User   @relation("ChamadosTecnico", fields: [tecnicoId], references: [id])
 
-  services  ChamadoService[]
+  services   ChamadoService[]
+  totalPrice Float?
 }
 
 model ChamadoService {
-  id        String   @id @default(uuid())
+  id        String @id @default(uuid())
   chamadoId String
   serviceId String
 
-  chamado   Chamado  @relation(fields: [chamadoId], references: [id])
-  service   Service  @relation(fields: [serviceId], references: [id])
+  chamado Chamado @relation(fields: [chamadoId], references: [id])
+  service Service @relation(fields: [serviceId], references: [id])
 }
 
 /// ----------------------
@@ -102,11 +86,11 @@ model ChamadoService {
 /// ----------------------
 
 model Disponibilidade {
-  id        String   @id @default(uuid())
+  id        String @id @default(uuid())
   tecnicoId String
   horario   String
 
-  tecnico   Tecnico  @relation(fields: [tecnicoId], references: [id])
+  tecnico User @relation("DisponibilidadesDoTecnico", fields: [tecnicoId], references: [id])
 }
 
 enum Status {
