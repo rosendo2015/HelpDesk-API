@@ -1,7 +1,7 @@
 import { authConfig } from "@/configs/auth";
 import { AppError } from "@/utils/AppError";
 import { Request, Response, NextFunction } from "express";
-import { verify } from "jsonwebtoken"
+import jwt from "jsonwebtoken"
 
 interface TokenPayload {
     role: string,
@@ -20,7 +20,7 @@ function ensureAuthenticated(
         if (!token) {
             throw new AppError("JWT token is missing", 401)
         }
-        const { role, sub: user_id } = verify(token, authConfig.jwt.secret) as TokenPayload
+        const { role, sub: user_id } = jwt.verify(token, authConfig.jwt.secret) as TokenPayload
         request.user = { id: user_id, role }
         return next()
     } catch (error) {

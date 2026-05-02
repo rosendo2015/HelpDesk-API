@@ -62,6 +62,10 @@ class UserController {
 
         const data = bodySchema.parse(request.body)
 
+        if (request.user?.role !== "ADMIN" && request.user?.id !== userId) {
+            throw new AppError("Você não tem permissão para atualizar este usuário", 403)
+        }
+
         // Verifica se usuário existe
         const user = await prisma.user.findUnique({ where: { id: userId } })
         if (!user) {
@@ -72,6 +76,7 @@ class UserController {
         if (data.password) {
             data.password = await hash(data.password, 8)
         }
+
 
         // Atualiza apenas os campos enviados
         const updatedUser = await prisma.user.update({
