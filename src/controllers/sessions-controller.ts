@@ -27,6 +27,7 @@ class SessionsController {
             expiresIn: "1d"
         }
         const token = jwt.sign({ role: user.role ?? "ADMIN" }, secret, options)
+
         const { password: _, ...userWithoutPassword } = user
 
         return response.json({ token, user })

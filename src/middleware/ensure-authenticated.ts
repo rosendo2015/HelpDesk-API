@@ -17,11 +17,20 @@ function ensureAuthenticated(
             throw new AppError("JWT token is missing", 401)
         }
         const [, token] = authHeader.split(" ")
+
+
+
         if (!token) {
             throw new AppError("JWT token is missing", 401)
         }
         const { role, sub: user_id } = jwt.verify(token, authConfig.jwt.secret) as TokenPayload
+
+
+
         request.user = { id: user_id, role }
+
+
+
         return next()
     } catch (error) {
         throw new AppError("Invalid JWT token", 401)

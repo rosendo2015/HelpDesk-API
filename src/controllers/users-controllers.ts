@@ -16,7 +16,6 @@ class UserController {
                 role: true,
                 createdAt: true,
                 updatedAt: true,
-                // não inclui password
             },
         });
 
@@ -36,11 +35,25 @@ class UserController {
             throw new AppError("Email already exist", 400)
         }
         const hashedPassword = await hash(password, 8)
+
+        const defaultHours = ['08:00', '09:00', '10:00', '11:00', '14:00', '15:00', '16:00', '17:00']
+
         const user = await prisma.user.create({
             data: {
                 name, email, password: hashedPassword, role
             }
         })
+
+        // popula a tabela Disponibilidade
+        if (role === "TECNICO") {
+            await prisma.disponibilidade.createMany({
+                data: defaultHours.map(horario => ({
+                    horario,
+                    tecnicoId: user.id
+                }))
+            })
+        }
+
         const { password: _, ...userWithoutPassword } = user
 
         return response.status(201).json(userWithoutPassword)
@@ -62,29 +75,34 @@ class UserController {
 
         const data = bodySchema.parse(request.body)
 
-        if (request.user?.role !== "ADMIN" && request.user?.id !== userId) {
-            throw new AppError("Você não tem permissão para atualizar este usuário", 403)
+        if (request.user?.role === "ADMIN") {
+            // ADMIN pode atualizar qualquer usuário
+        } else if (request.user?.role === "TECNICO") {
+            // TECNICO só pode atualizar o próprio perfil
+            if (request.user.id !== userId) {
+                throw new AppError("Você não tem permissão para atualizar outro usuário", 403);
+            }
+        } else {
+            // CLIENTE só pode atualizar o próprio perfil também
+            if (request.user?.id !== userId) {
+                throw new AppError("Você não tem permissão para atualizar outro usuário", 403);
+            }
         }
 
-        // Verifica se usuário existe
         const user = await prisma.user.findUnique({ where: { id: userId } })
         if (!user) {
             throw new AppError("Usuário não encontrado", 404)
         }
 
-        // Se tiver senha, faz o hash
         if (data.password) {
             data.password = await hash(data.password, 8)
         }
 
-
-        // Atualiza apenas os campos enviados
         const updatedUser = await prisma.user.update({
             where: { id: userId },
             data
         })
 
-        // Remove o password da resposta
         const { password, ...userWithoutPassword } = updatedUser
 
         return response.status(200).json(userWithoutPassword)
