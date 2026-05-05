@@ -4,15 +4,14 @@ import { AppError } from "@/utils/AppError"
 
 class ChamadosControllers {
     async index(request: Request, response: Response) {
-        return response.json({
-            message: "Lista de chamados"
-        })
+        const chamados = await prisma.chamado.findMany()
+        return response.json(chamados)
     }
 
     async create(request: Request, response: Response) {
-        const { tecnicoId, horario, services } = request.body
+        const { tecnicoId, horario, adminId, services } = request.body
         const clienteId = request.user?.id
-        const adminId = "ID_DO_ADMIN" // pode vir do contexto
+
 
         if (!clienteId) {
             throw new AppError("Cliente não autenticado", 401)

@@ -4,7 +4,7 @@ import { AppError } from "@/utils/AppError"
 
 class ServicesController {
     async create(request: Request, response: Response) {
-        const { name, description, price, active } = request.body
+        const { name, price, active } = request.body
         const adminId = request.user?.id // pega do usuário logado
 
         if (!adminId) {
@@ -14,7 +14,6 @@ class ServicesController {
         const service = await prisma.service.create({
             data: {
                 name,
-                description,
                 price,
                 active,
                 adminId
@@ -33,11 +32,12 @@ class ServicesController {
 
     async update(request: Request, response: Response) {
         const { id } = request.params
-        const { name, description, price, active } = request.body
+        const userId = Array.isArray(id) ? id[0] : id
+        const { name, price, active } = request.body
 
         const service = await prisma.service.update({
-            where: { id },
-            data: { name, description, price, active }
+            where: { id: userId },
+            data: { name, price, active }
         })
 
         return response.json(service)
