@@ -68,6 +68,9 @@ model Chamado {
   tecnicoId String
   tecnico   User   @relation("ChamadosTecnico", fields: [tecnicoId], references: [id])
 
+  disponibilidadeId String
+  disponibilidade Disponibilidade @relation(fields: [disponibilidadeId], references: [id])
+
   services   ChamadoService[]
   totalPrice Float?
 }
@@ -91,6 +94,7 @@ model Disponibilidade {
   horario   String
 
   tecnico User @relation("DisponibilidadesDoTecnico", fields: [tecnicoId], references: [id])
+  chamados  Chamado[]   // <-- relação inversa
 }
 
 enum Status {
