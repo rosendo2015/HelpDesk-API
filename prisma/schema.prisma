@@ -93,7 +93,7 @@ model Disponibilidade {
   tecnicoId String
   horario   String
 
-  tecnico User @relation("DisponibilidadesDoTecnico", fields: [tecnicoId], references: [id])
+  tecnico User @relation("DisponibilidadesDoTecnico", fields: [tecnicoId], references: [id], onDelete: Cascade)
   chamados  Chamado[]   // <-- relação inversa
 }
 

@@ -1,49 +1,53 @@
-import { UserController } from '@/controllers/users-controllers'
-import { ensureAuthenticated } from '@/middleware/ensure-authenticated'
-import { verifyUserAuthorization } from '@/middleware/verifyuserAuthorization'
-import { Router } from 'express'
-import { prisma } from '@/database/prisma'
+import { Router } from "express"
+import { UserController } from "@/controllers/users-controllers"
+import { ensureAuthenticated } from "@/middleware/ensure-authenticated"
+import { verifyUserAuthorization } from "@/middleware/verifyuserAuthorization"
+import { asyncHandler } from "@/utils/asyncHandler"
+import { prisma } from "@/database/prisma"
 
 const usersRoutes = Router()
 const userController = new UserController()
 
+// Listar todos os usuários (somente ADMIN)
+usersRoutes.get("/", asyncHandler(async (req, res) => {
+    ensureAuthenticated(req, res, () => {
+        verifyUserAuthorization(["ADMIN"])(req, res, async () => {
+            await userController.index(req, res)
+        })
+    })
+}))
 
-
-// Criar usuário (Admin ou Cliente)
-// Se não existe Admin ainda, permite criar o primeiro Admin sem token
-usersRoutes.post('/', async (req, res, next) => {
+// Criar usuário (Admin, Técnico ou Cliente)
+usersRoutes.post("/", asyncHandler(async (req, res, next) => {
     const adminExists = await prisma.user.findFirst({ where: { role: "ADMIN" } })
 
     if (!adminExists && req.body.role === "ADMIN") {
         // cria o primeiro Admin sem exigir autenticação
-        return userController.create(req, res)
+        return userController.create(req, res, next)
     }
 
     // se já existe Admin, exige autenticação e autorização
-    return ensureAuthenticated(req, res, () => {
-        verifyUserAuthorization(["ADMIN"])(req, res, () => {
-            userController.create(req, res)
+    ensureAuthenticated(req, res, () => {
+        verifyUserAuthorization(["ADMIN"])(req, res, async () => {
+            await userController.create(req, res, next)
         })
     })
-})
+}))
 
-// Cadastro de técnico (apenas ADMIN pode criar)
-usersRoutes.post("/tecnicos",
-    ensureAuthenticated,
-    verifyUserAuthorization(["ADMIN"]),
-    async (request, response) => {
-        if (request.user?.role !== "ADMIN") {
-            return response.status(403).json({ message: "Apenas ADMIN pode cadastrar técnicos" })
-        }
+// Atualizar usuário (Admin pode atualizar qualquer um, Técnico/Cliente só o próprio)
+usersRoutes.put("/:id", asyncHandler(async (req, res) => {
+    ensureAuthenticated(req, res, async () => {
+        await userController.update(req, res)
+    })
+}))
 
-        // força o role para TECNICO
-        request.body.role = "TECNICO"
-        return userController.create(request, response)
-    }
-)
-
-usersRoutes.get('/', ensureAuthenticated, verifyUserAuthorization(["ADMIN"]), userController.index)
-usersRoutes.put('/:id', ensureAuthenticated, verifyUserAuthorization(["ADMIN"]), userController.update)
-usersRoutes.patch('/:id', ensureAuthenticated, verifyUserAuthorization(["ADMIN", "TECNICO"]), userController.update)
+// Excluir usuário (Admin pode excluir Admin, Técnico ou Cliente)
+usersRoutes.delete("/:id", asyncHandler(async (req, res, next) => {
+    ensureAuthenticated(req, res, () => {
+        verifyUserAuthorization(["ADMIN"])(req, res, async () => {
+            await userController.delete(req, res, next)
+        })
+    })
+}))
 
 export { usersRoutes }

@@ -1,7 +1,7 @@
 import { prisma } from "@/database/prisma"
 import { AppError } from "@/utils/AppError"
 import { hash } from "bcrypt"
-import { Request, Response } from "express"
+import { Request, Response, NextFunction } from "express"
 import z from "zod"
 
 class UserController {
@@ -22,41 +22,44 @@ class UserController {
         return response.status(200).json(users);
     }
 
-    async create(request: Request, response: Response) {
-        const bodySchema = z.object({
-            name: z.string().trim().min(3, { message: "O nome deve ter pelomenos 3 caracteres." }),
-            email: z.email(),
-            password: z.string().min(6),
-            role: z.enum(["ADMIN", "TECNICO", "CLIENTE"])
-        })
-        const { name, email, password, role } = bodySchema.parse(request.body)
-        const userWithSameEmail = await prisma.user.findUnique({ where: { email } })
-        if (userWithSameEmail) {
-            throw new AppError("Email already exist", 400)
-        }
-        const hashedPassword = await hash(password, 8)
-
-        const defaultHours = ['08:00', '09:00', '10:00', '11:00', '14:00', '15:00', '16:00', '17:00']
-
-        const user = await prisma.user.create({
-            data: {
-                name, email, password: hashedPassword, role
-            }
-        })
-
-        // popula a tabela Disponibilidade
-        if (role === "TECNICO") {
-            await prisma.disponibilidade.createMany({
-                data: defaultHours.map(horario => ({
-                    horario,
-                    tecnicoId: user.id
-                }))
+    async create(request: Request, response: Response, next: NextFunction) {
+        try {
+            const bodySchema = z.object({
+                name: z.string().trim().min(3, { message: "O nome deve ter pelomenos 3 caracteres." }),
+                email: z.email(),
+                password: z.string().min(6),
+                role: z.enum(["ADMIN", "TECNICO", "CLIENTE"])
             })
+            const { name, email, password, role } = bodySchema.parse(request.body)
+            const userWithSameEmail = await prisma.user.findUnique({ where: { email } })
+            if (userWithSameEmail) {
+                throw new AppError("Email already exist", 400)
+            }
+            const hashedPassword = await hash(password, 8)
+
+            const defaultHours = ['08:00', '09:00', '10:00', '11:00', '14:00', '15:00', '16:00', '17:00']
+
+            const user = await prisma.user.create({
+                data: {
+                    name, email, password: hashedPassword, role
+                }
+            })
+
+            // popula a tabela Disponibilidade
+            if (role === "TECNICO") {
+                await prisma.disponibilidade.createMany({
+                    data: defaultHours.map(horario => ({
+                        horario,
+                        tecnicoId: user.id
+                    }))
+                })
+            }
+            const { password: _, ...userWithoutPassword } = user
+
+            return response.status(201).json(userWithoutPassword)
+        } catch (error) {
+            next(error)
         }
-
-        const { password: _, ...userWithoutPassword } = user
-
-        return response.status(201).json(userWithoutPassword)
     }
 
     async update(request: Request, response: Response) {
@@ -106,6 +109,45 @@ class UserController {
         const { password, ...userWithoutPassword } = updatedUser
 
         return response.status(200).json(userWithoutPassword)
+
+    }
+
+    async delete(request: Request, response: Response, next: NextFunction) {
+        try {
+            const { id } = request.params
+            const userId = Array.isArray(id) ? id[0] : id
+
+            if (request.user?.role !== "ADMIN") {
+                throw new AppError("Você não tem permissão para excluir usuários", 403)
+            }
+
+            const user = await prisma.user.findUnique({ where: { id: userId } })
+            if (!user) {
+                throw new AppError("Usuário não encontrado", 404)
+            }
+
+            // Agora permite excluir ADMIN, TECNICO e CLIENTE
+            if (user.role === "ADMIN") {
+                await prisma.user.delete({ where: { id: userId } })
+                return response.status(200).json({ message: "Administrador excluído com sucesso" })
+            }
+
+            if (user.role === "TECNICO") {
+                await prisma.disponibilidade.deleteMany({ where: { tecnicoId: userId } })
+                await prisma.user.delete({ where: { id: userId } })
+                return response.status(200).json({ message: "Técnico excluído com sucesso" })
+            }
+
+            if (user.role === "CLIENTE") {
+                await prisma.chamadoService.deleteMany({ where: { chamado: { clienteId: userId } } })
+                await prisma.user.delete({ where: { id: userId } })
+                return response.status(200).json({ message: "Cliente excluído com sucesso" })
+            }
+            console.log("Role recebido do banco:", user.role)
+            throw new AppError("Tipo de usuário não suportado para exclusão", 400)
+        } catch (error) {
+            next(error)
+        }
 
     }
 }
