@@ -133,10 +133,25 @@ class UserController {
             }
 
             if (user.role === "TECNICO") {
+                // Verifica se existem chamados atribuídos ao técnico
+                const chamadosDoTecnico = await prisma.chamado.findMany({
+                    where: { tecnicoId: userId }
+                })
+
+                if (chamadosDoTecnico.length > 0) {
+                    throw new AppError(
+                        "Este técnico possui chamados atribuídos. Reatribua os chamados a outro técnico antes de excluir.",
+                        400
+                    )
+                }
+
+                // Se não houver chamados, pode excluir as disponibilidades e o usuário
                 await prisma.disponibilidade.deleteMany({ where: { tecnicoId: userId } })
                 await prisma.user.delete({ where: { id: userId } })
+
                 return response.status(200).json({ message: "Técnico excluído com sucesso" })
             }
+
 
             if (user.role === "CLIENTE") {
                 await prisma.chamadoService.deleteMany({ where: { chamado: { clienteId: userId } } })

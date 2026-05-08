@@ -19,4 +19,16 @@ chamadosRoutes.get("/",
     chamadosControllers.index
 )
 
+// Listar chamados de um tecnico especifico 
+chamadosRoutes.get("/tecnico/:id",
+    ensureAuthenticated,
+    chamadosControllers.listByTecnico
+)
+
+// Update chamados - passe o id do chamado
+chamadosRoutes.patch("/:id",
+    ensureAuthenticated,
+    chamadosControllers.update
+)
+
 export { chamadosRoutes }

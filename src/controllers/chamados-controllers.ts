@@ -70,6 +70,94 @@ class ChamadosControllers {
 
         return response.status(201).json(chamado)
     }
+
+    async update(request: Request, response: Response) {
+        const { id } = request.params
+        const chamadoId = Array.isArray(id) ? id[0] : id
+        const { tecnicoId, disponibilidadeId, status, services } = request.body
+
+        // 1. Verificar se o chamado existe
+        const chamado = await prisma.chamado.findUnique({ where: { id: chamadoId } })
+        if (!chamado) {
+            throw new AppError("Chamado não encontrado", 404)
+        }
+
+        // 2. Validar disponibilidade se informada junto com técnico
+        if (tecnicoId && disponibilidadeId) {
+            const disponibilidade = await prisma.disponibilidade.findUnique({
+                where: { id: disponibilidadeId }
+            })
+
+            if (!disponibilidade || disponibilidade.tecnicoId !== tecnicoId) {
+                throw new AppError("Disponibilidade inválida para esse técnico", 400)
+            }
+        }
+
+        // 3. Atualizar serviços e recalcular preço se necessário
+        let totalPrice = chamado.totalPrice
+        if (services && Array.isArray(services) && services.length > 0) {
+            const servicos = await prisma.service.findMany({
+                where: { id: { in: services } }
+            })
+            totalPrice = servicos.reduce((acc, s) => acc + s.price, 0)
+
+            // Remove serviços antigos
+            await prisma.chamadoService.deleteMany({ where: { chamadoId } })
+
+            // Adiciona novos serviços
+            await prisma.chamadoService.createMany({
+                data: services.map((serviceId: string) => ({
+                    chamadoId,
+                    serviceId
+                }))
+            })
+        }
+
+        // 4. Atualizar chamado
+        const chamadoAtualizado = await prisma.chamado.update({
+            where: { id: chamadoId },
+            data: {
+                tecnicoId,
+                disponibilidadeId,
+                status,
+                totalPrice
+            },
+            include: {
+                disponibilidade: true,
+                tecnico: true,
+                cliente: true,
+                services: { include: { service: true } }
+            }
+        })
+
+        return response.status(200).json(chamadoAtualizado)
+    }
+
+    async listByTecnico(request: Request, response: Response) {
+        const { id } = request.params
+        const tecnicoId = Array.isArray(id) ? id[0] : id
+
+        // Verifica se o técnico existe
+        const tecnico = await prisma.user.findUnique({
+            where: { id: tecnicoId }
+        })
+
+        if (!tecnico || tecnico.role !== "TECNICO") {
+            throw new AppError("Técnico não encontrado", 404)
+        }
+        // Busca os chamados atribuídos ao técnico
+        const chamados = await prisma.chamado.findMany({
+            where: { tecnicoId, status: { not: "ENCERRADO" } },
+            include: {
+                disponibilidade: true,
+                tecnico: true,
+                cliente: true,
+                services: { include: { service: true } }
+            }
+        })
+
+        return response.status(200).json(chamados)
+    }
 }
 
 export { ChamadosControllers }
