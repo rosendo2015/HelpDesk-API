@@ -35,11 +35,17 @@ usersRoutes.post("/", asyncHandler(async (req, res, next) => {
 }))
 
 // Atualizar usuário (Admin pode atualizar qualquer um, Técnico/Cliente só o próprio)
-usersRoutes.put("/:id", asyncHandler(async (req, res) => {
+usersRoutes.patch("/:id", asyncHandler(async (req, res) => {
     ensureAuthenticated(req, res, async () => {
         await userController.update(req, res)
     })
 }))
+
+// Listar todos os técnicos
+usersRoutes.get("/tecnicos",
+    ensureAuthenticated,
+    userController.listTecnicos
+)
 
 // Excluir usuário (Admin pode excluir Admin, Técnico ou Cliente)
 usersRoutes.delete("/:id", asyncHandler(async (req, res, next) => {

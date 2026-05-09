@@ -112,6 +112,27 @@ class UserController {
 
     }
 
+    async listTecnicos(request: Request, response: Response, next: NextFunction) {
+        try {
+
+            const tecnicos = await prisma.user.findMany({
+                where: { role: "TECNICO" },
+                select: {
+                    id: true,
+                    name: true,
+                    email: true,
+                    createdAt: true,
+                    updatedAt: true
+                }
+            })
+
+            return response.status(200).json(tecnicos)
+
+        } catch (error) {
+            next(error)
+        }
+    }
+
     async delete(request: Request, response: Response, next: NextFunction) {
         try {
             const { id } = request.params

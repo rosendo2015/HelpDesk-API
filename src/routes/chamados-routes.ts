@@ -19,6 +19,18 @@ chamadosRoutes.get("/",
     chamadosControllers.index
 )
 
+// Listar todos os administradores
+chamadosRoutes.get("/admins",
+    ensureAuthenticated, // só usuários logados podem acessar
+    chamadosControllers.listAdmins
+)
+
+// Listar todos os clientes
+chamadosRoutes.get("/clientes",
+    ensureAuthenticated,
+    chamadosControllers.listClientes
+)
+
 // Listar chamados de um tecnico especifico 
 chamadosRoutes.get("/tecnico/:id",
     ensureAuthenticated,

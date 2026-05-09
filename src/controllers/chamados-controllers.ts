@@ -1,5 +1,5 @@
 import { prisma } from "@/database/prisma"
-import { Request, Response } from "express"
+import { NextFunction, Request, Response } from "express"
 import { AppError } from "@/utils/AppError"
 
 class ChamadosControllers {
@@ -133,31 +133,71 @@ class ChamadosControllers {
         return response.status(200).json(chamadoAtualizado)
     }
 
-    async listByTecnico(request: Request, response: Response) {
-        const { id } = request.params
-        const tecnicoId = Array.isArray(id) ? id[0] : id
-
-        // Verifica se o técnico existe
-        const tecnico = await prisma.user.findUnique({
-            where: { id: tecnicoId }
-        })
-
-        if (!tecnico || tecnico.role !== "TECNICO") {
-            throw new AppError("Técnico não encontrado", 404)
-        }
-        // Busca os chamados atribuídos ao técnico
-        const chamados = await prisma.chamado.findMany({
-            where: { tecnicoId, status: { not: "ENCERRADO" } },
-            include: {
-                disponibilidade: true,
-                tecnico: true,
-                cliente: true,
-                services: { include: { service: true } }
+    async listAdmins(request: Request, response: Response) {
+        // Busca todos os usuários com role ADMIN
+        const admins = await prisma.user.findMany({
+            where: { role: "ADMIN" },
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                createdAt: true,
+                updatedAt: true
             }
         })
 
-        return response.status(200).json(chamados)
+        return response.status(200).json(admins)
     }
+
+    async listClientes(request: Request, response: Response) {
+        const clientes = await prisma.user.findMany({
+            where: { role: "CLIENTE" },
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                createdAt: true,
+                updatedAt: true
+            }
+        })
+
+        return response.status(200).json(clientes)
+    }
+
+
+    async listByTecnico(request: Request, response: Response, next: NextFunction) {
+        try {
+
+            const { id } = request.params
+            const tecnicoId = Array.isArray(id) ? id[0] : id
+
+            // Verifica se o técnico existe
+            const tecnico = await prisma.user.findUnique({
+                where: { id: tecnicoId }
+            })
+
+            if (!tecnico || tecnico.role !== "TECNICO") {
+                throw new AppError("Técnico não encontrado", 404)
+            }
+            // Busca os chamados atribuídos ao técnico
+            const chamados = await prisma.chamado.findMany({
+                where: { tecnicoId, status: { not: "ENCERRADO" } },
+                include: {
+                    disponibilidade: true,
+                    tecnico: true,
+                    cliente: true,
+                    services: { include: { service: true } }
+                }
+            })
+
+            return response.status(200).json(chamados)
+
+        } catch (error) {
+            next(error)
+        }
+    }
+
+
 }
 
 export { ChamadosControllers }
