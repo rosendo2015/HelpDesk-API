@@ -1,7 +1,7 @@
 import { Router } from "express"
 import { UserController } from "@/controllers/users-controllers"
 import { ensureAuthenticated } from "@/middleware/ensure-authenticated"
-import { verifyUserAuthorization } from "@/middleware/verifyuserAuthorization"
+import { verifyUserAuthorization } from "@/middleware/verifyUserAuthorization"
 import { asyncHandler } from "@/utils/asyncHandler"
 import { prisma } from "@/database/prisma"
 
@@ -41,10 +41,21 @@ usersRoutes.patch("/:id", asyncHandler(async (req, res) => {
     })
 }))
 
+// Listar todos os administradores
+usersRoutes.get("/admins",
+    ensureAuthenticated, // só usuários logados podem acessar
+    userController.listAdmins
+)
+
 // Listar todos os técnicos
 usersRoutes.get("/tecnicos",
     ensureAuthenticated,
     userController.listTecnicos
+)
+// Listar todos os clientes
+usersRoutes.get("/clientes",
+    ensureAuthenticated,
+    userController.listClientes
 )
 
 // Excluir usuário (Admin pode excluir Admin, Técnico ou Cliente)

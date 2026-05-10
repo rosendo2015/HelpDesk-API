@@ -133,38 +133,6 @@ class ChamadosControllers {
         return response.status(200).json(chamadoAtualizado)
     }
 
-    async listAdmins(request: Request, response: Response) {
-        // Busca todos os usuários com role ADMIN
-        const admins = await prisma.user.findMany({
-            where: { role: "ADMIN" },
-            select: {
-                id: true,
-                name: true,
-                email: true,
-                createdAt: true,
-                updatedAt: true
-            }
-        })
-
-        return response.status(200).json(admins)
-    }
-
-    async listClientes(request: Request, response: Response) {
-        const clientes = await prisma.user.findMany({
-            where: { role: "CLIENTE" },
-            select: {
-                id: true,
-                name: true,
-                email: true,
-                createdAt: true,
-                updatedAt: true
-            }
-        })
-
-        return response.status(200).json(clientes)
-    }
-
-
     async listByTecnico(request: Request, response: Response, next: NextFunction) {
         try {
 

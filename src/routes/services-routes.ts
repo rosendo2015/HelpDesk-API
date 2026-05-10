@@ -1,7 +1,7 @@
 import { Router } from "express"
 import { ServicesController } from "@/controllers/services-controller"
 import { ensureAuthenticated } from "@/middleware/ensure-authenticated"
-import { verifyUserAuthorization } from "@/middleware/verifyuserAuthorization"
+import { verifyUserAuthorization } from "@/middleware/verifyUserAuthorization"
 
 const servicesRoutes = Router()
 const servicesController = new ServicesController()

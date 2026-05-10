@@ -112,6 +112,22 @@ class UserController {
 
     }
 
+    async listAdmins(request: Request, response: Response) {
+        // Busca todos os usuários com role ADMIN
+        const admins = await prisma.user.findMany({
+            where: { role: "ADMIN" },
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                createdAt: true,
+                updatedAt: true
+            }
+        })
+
+        return response.status(200).json(admins)
+    }
+
     async listTecnicos(request: Request, response: Response, next: NextFunction) {
         try {
 
@@ -131,6 +147,21 @@ class UserController {
         } catch (error) {
             next(error)
         }
+    }
+
+    async listClientes(request: Request, response: Response) {
+        const clientes = await prisma.user.findMany({
+            where: { role: "CLIENTE" },
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                createdAt: true,
+                updatedAt: true
+            }
+        })
+
+        return response.status(200).json(clientes)
     }
 
     async delete(request: Request, response: Response, next: NextFunction) {
