@@ -1,8 +1,36 @@
 import { NextFunction, Request, Response } from "express";
 import { DiskStorage } from "@/providers/disk-storage";
 import { prisma } from "@/database/prisma";
+import path from "path";
+import uploadConfig from "@/configs/upload";
 
 class UserAvatarController {
+    async index(request: Request, response: Response, next: NextFunction) {
+        try {
+            if (!request.user) {
+                return response.status(401).json({ error: "Usuário não autenticado" });
+            }
+
+            const userId = request.user.id;
+            const user = await prisma.user.findUnique({
+                where: { id: userId },
+                select: { avatarUrl: true }
+            });
+
+            if (!user || !user.avatarUrl) {
+                return response.status(404).json({ error: "Avatar não encontrado" });
+            }
+
+            // Caminho completo do arquivo
+            const filePath = path.resolve(uploadConfig.UPLOADS_FOLDER, user.avatarUrl);
+
+            // Envia o arquivo diretamente
+            return response.sendFile(filePath);
+        } catch (error) {
+            console.log(error);
+            next(error);
+        }
+    }
     async update(request: Request, response: Response, next: NextFunction) {
         try {
 

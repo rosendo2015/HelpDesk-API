@@ -14,5 +14,10 @@ userAvatarRoutes.post(
     upload.single("file"),
     userAvatarController.update
 );
+userAvatarRoutes.get(
+    "/avatar",
+    ensureAuthenticated,
+    userAvatarController.index
+);
 
 export { userAvatarRoutes };
