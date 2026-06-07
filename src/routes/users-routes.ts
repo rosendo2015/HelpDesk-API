@@ -9,30 +9,36 @@ const usersRoutes = Router()
 const userController = new UserController()
 
 // Listar todos os usuários (somente ADMIN)
-usersRoutes.get("/", asyncHandler(async (req, res) => {
+usersRoutes.get("/", asyncHandler(async (req, res, next) => {
     ensureAuthenticated(req, res, () => {
         verifyUserAuthorization(["ADMIN"])(req, res, async () => {
-            await userController.index(req, res)
+            await userController.index(req, res, next)
         })
     })
 }))
 
 // Criar usuário (Admin, Técnico ou Cliente)
 usersRoutes.post("/", asyncHandler(async (req, res, next) => {
-    const adminExists = await prisma.user.findFirst({ where: { role: "ADMIN" } })
+    const { role } = req.body;
 
-    if (!adminExists && req.body.role === "ADMIN") {
-        // cria o primeiro Admin sem exigir autenticação
-        return userController.create(req, res, next)
+    // Permite cadastro público de CLIENTE
+    if (role === "CLIENTE") {
+        return userController.create(req, res, next);
     }
 
-    // se já existe Admin, exige autenticação e autorização
+    // Mantém regra para ADMIN e TECNICO
+    const adminExists = await prisma.user.findFirst({ where: { role: "ADMIN" } });
+    if (!adminExists && role === "ADMIN") {
+        return userController.create(req, res, next);
+    }
+
     ensureAuthenticated(req, res, () => {
         verifyUserAuthorization(["ADMIN"])(req, res, async () => {
-            await userController.create(req, res, next)
-        })
-    })
-}))
+            await userController.create(req, res, next);
+        });
+    });
+}));
+
 
 // Atualizar usuário (Admin pode atualizar qualquer um, Técnico/Cliente só o próprio)
 usersRoutes.patch("/:id", asyncHandler(async (req, res) => {

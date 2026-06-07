@@ -1,12 +1,14 @@
+import { authConfig } from "@/configs/auth"
 import { prisma } from "@/database/prisma"
 import { AppError } from "@/utils/AppError"
 import { hash } from "bcrypt"
 import { Request, Response, NextFunction } from "express"
+import { SignOptions } from "jsonwebtoken"
+import jwt from "jsonwebtoken"
 import z from "zod"
 
 class UserController {
-
-    async index(request: Request, response: Response) {
+    async index(request: Request, response: Response, next: NextFunction) {
         const users = await prisma.user.findMany({
             select: {
                 id: true,
@@ -25,40 +27,51 @@ class UserController {
     async create(request: Request, response: Response, next: NextFunction) {
         try {
             const bodySchema = z.object({
-                name: z.string().trim().min(3, { message: "O nome deve ter pelomenos 3 caracteres." }),
-                email: z.email(),
+                name: z.string().trim().min(3, { message: "O nome deve ter pelo menos 3 caracteres." }),
+                email: z.string().email(),
                 password: z.string().min(6),
                 role: z.enum(["ADMIN", "TECNICO", "CLIENTE"])
-            })
-            const { name, email, password, role } = bodySchema.parse(request.body)
-            const userWithSameEmail = await prisma.user.findUnique({ where: { email } })
-            if (userWithSameEmail) {
-                throw new AppError("Email already exist", 400)
-            }
-            const hashedPassword = await hash(password, 8)
+            });
 
-            const defaultHours = ['08:00', '09:00', '10:00', '11:00', '14:00', '15:00', '16:00', '17:00']
+            const { name, email, password, role } = bodySchema.parse(request.body);
+
+            const userWithSameEmail = await prisma.user.findUnique({ where: { email } });
+            if (userWithSameEmail) {
+                throw new AppError("Email já existe", 400);
+            }
+
+            const hashedPassword = await hash(password, 8);
+
+            const defaultHours = ["08:00", "09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"];
 
             const user = await prisma.user.create({
-                data: {
-                    name, email, password: hashedPassword, role
-                }
-            })
+                data: { name, email, password: hashedPassword, role }
+            });
 
-            // popula a tabela Disponibilidade
+            // Popula a tabela Disponibilidade para técnicos
             if (role === "TECNICO") {
                 await prisma.disponibilidade.createMany({
                     data: defaultHours.map(horario => ({
                         horario,
                         tecnicoId: user.id
                     }))
-                })
+                });
             }
-            const { password: _, ...userWithoutPassword } = user
 
-            return response.status(201).json(userWithoutPassword)
+            // 🔐 Gera token JWT padronizado
+            const { secret, expiresIn } = authConfig.jwt;
+            const options: SignOptions = {
+                subject: String(user.id),
+                expiresIn: expiresIn as any // ✅ Corrige o tipo para evitar erro TS
+            };
+            const token = jwt.sign({ role: user.role }, secret, options);
+
+            const { password: _, ...userWithoutPassword } = user;
+
+            return response.status(201).json({ user: userWithoutPassword, token });
         } catch (error) {
-            next(error)
+            console.log("Erro no create:", error)
+            next(error);
         }
     }
 
@@ -130,7 +143,6 @@ class UserController {
 
     async listTecnicos(request: Request, response: Response, next: NextFunction) {
         try {
-
             const tecnicos = await prisma.user.findMany({
                 where: { role: "TECNICO" },
                 select: {
