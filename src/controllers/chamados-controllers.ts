@@ -9,10 +9,26 @@ class ChamadosControllers {
                 disponibilidade: true,
                 tecnico: true,
                 cliente: true,
-                services: { include: { service: true } }
-            }
+                services: { include: { service: true } },
+            },
         })
-        return response.json(chamados)
+
+        const chamadosFormatados = chamados.map(chamado => ({
+            id: chamado.id,
+            status: chamado.status,
+            updatedAt: chamado.updatedAt,
+            totalPrice: chamado.totalPrice,
+            cliente: chamado.cliente.name,
+            tecnico: chamado.tecnico.name,
+            services: chamado.services.map(s => ({
+                nome: s.service.name,
+                valor: s.service.price,
+            })),
+        }))
+
+
+
+        return response.json(chamadosFormatados)
     }
 
     async create(request: Request, response: Response) {
