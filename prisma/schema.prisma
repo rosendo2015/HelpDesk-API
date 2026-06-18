@@ -73,6 +73,8 @@ model Chamado {
 
   services   ChamadoService[]
   totalPrice Float?
+
+  title String
 }
 
 model ChamadoService {

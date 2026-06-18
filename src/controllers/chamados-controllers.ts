@@ -15,6 +15,7 @@ class ChamadosControllers {
 
         const chamadosFormatados = chamados.map(chamado => ({
             id: chamado.id,
+            title: chamado.title,
             status: chamado.status,
             updatedAt: chamado.updatedAt,
             totalPrice: chamado.totalPrice,
@@ -32,7 +33,7 @@ class ChamadosControllers {
     }
 
     async create(request: Request, response: Response) {
-        const { tecnicoId, disponibilidadeId, adminId, services } = request.body
+        const { tecnicoId, disponibilidadeId, adminId, services, title } = request.body
         const clienteId = request.user?.id
 
         if (!clienteId) {
@@ -72,6 +73,7 @@ class ChamadosControllers {
                 disponibilidadeId,
                 status: "ABERTO",
                 totalPrice,
+                title,
                 services: {
                     create: services.map((serviceId: string) => ({ serviceId }))
                 }
@@ -90,7 +92,7 @@ class ChamadosControllers {
     async update(request: Request, response: Response) {
         const { id } = request.params
         const chamadoId = Array.isArray(id) ? id[0] : id
-        const { tecnicoId, disponibilidadeId, status, services } = request.body
+        const { tecnicoId, disponibilidadeId, status, services, title } = request.body
 
         // 1. Verificar se o chamado existe
         const chamado = await prisma.chamado.findUnique({ where: { id: chamadoId } })
@@ -136,7 +138,8 @@ class ChamadosControllers {
                 tecnicoId,
                 disponibilidadeId,
                 status,
-                totalPrice
+                totalPrice,
+                title
             },
             include: {
                 disponibilidade: true,
