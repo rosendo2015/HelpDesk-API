@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "tsx --watch --env-file .env src/server.ts",
+    "generate-md": "node --loader ts-node/esm tools/generate-md.ts",
     "build": "tsc",
     "start": "node dist/server.js"
   },
@@ -26,13 +27,17 @@
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
+    "@types/connect-livereload": "^0.6.3",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/livereload": "^0.9.5",
     "@types/multer": "^2.1.0",
-    "@types/node": "^25.6.0",
+    "@types/node": "^25.9.4",
     "@types/pg": "^8.20.0",
+    "livereload": "^0.10.3",
     "prisma": "^7.8.0",
+    "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3"
   }

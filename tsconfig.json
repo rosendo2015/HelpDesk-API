@@ -6,18 +6,14 @@
     "outDir": "./dist",
     "baseUrl": ".",
     "paths": {
-      "@/*": [
-        "./src/*"
-      ]
+      "@/*": ["./src/*"]
     },
     "esModuleInterop": true,
     "strict": true,
     "skipLibCheck": true,
     "allowArbitraryExtensions": true,
     "ignoreDeprecations": "6.0",
+    "types": ["node"]
   },
-  "include": [
-    "src",
-    "generated"
-  ]
+  "include": ["src", "generated", "tools", "tools/generate-md.ts"]
 }
