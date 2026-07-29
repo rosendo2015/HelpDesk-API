@@ -9,6 +9,31 @@ const usersRoutes = Router();
 const userController = new UserController();
 
 /* -------------------------
+   🔹 ROTAS DE LISTAGEM
+------------------------- */
+
+// Listar todos os usuários (somente ADMIN)
+usersRoutes.get(
+  "/",
+  asyncHandler(async (req, res, next) => {
+    ensureAuthenticated(req, res, () => {
+      verifyUserAuthorization(["ADMIN"])(req, res, async () => {
+        await userController.index(req, res, next);
+      });
+    });
+  }),
+);
+
+// Listar todos os administradores
+usersRoutes.get("/admins", ensureAuthenticated, userController.listAdmins);
+
+// Listar todos os técnicos
+usersRoutes.get("/tecnicos", ensureAuthenticated, userController.listTecnicos);
+
+// Listar todos os clientes
+usersRoutes.get("/clientes", ensureAuthenticated, userController.listClientes);
+
+/* -------------------------
    🔹 ROTAS DE CONSULTA INDIVIDUAL
 ------------------------- */
 
@@ -17,7 +42,7 @@ usersRoutes.get(
   "/:id",
   asyncHandler(async (req, res, next) => {
     ensureAuthenticated(req, res, async () => {
-      await userController.show(req, res);
+      await userController.show(req, res, next);
     });
   }),
 );
@@ -43,31 +68,6 @@ usersRoutes.delete(
     });
   }),
 );
-
-/* -------------------------
-   🔹 ROTAS DE LISTAGEM
-------------------------- */
-
-// Listar todos os usuários (somente ADMIN)
-usersRoutes.get(
-  "/",
-  asyncHandler(async (req, res, next) => {
-    ensureAuthenticated(req, res, () => {
-      verifyUserAuthorization(["ADMIN"])(req, res, async () => {
-        await userController.index(req, res, next);
-      });
-    });
-  }),
-);
-
-// Listar todos os administradores
-usersRoutes.get("/admins", ensureAuthenticated, userController.listAdmins);
-
-// Listar todos os técnicos
-usersRoutes.get("/tecnicos", ensureAuthenticated, userController.listTecnicos);
-
-// Listar todos os clientes
-usersRoutes.get("/clientes", ensureAuthenticated, userController.listClientes);
 
 /* -------------------------
    🔹 ROTAS DE CRIAÇÃO

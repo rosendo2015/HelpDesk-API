@@ -116,21 +116,19 @@ class UserController {
       userData.password = await hash(userData.password, 8);
     }
 
-    const updatedUser = await prisma.user.update({
-      where: { id: userId },
-      data: {
-        ...userData,
-        // ✅ Atualiza disponibilidades junto com o usuário
-        ...(user.role === "TECNICO" && horarios
-          ? {
-              disponibilidades: {
-                set: [],
-                create: horarios.map((horario) => ({ horario })),
-              },
-            }
-          : {}),
-      },
-      include: { disponibilidades: true },
+    const updatedUser = await prisma.$transaction(async (tx) => {
+      if (user.role === "TECNICO" && horarios) {
+        await tx.disponibilidade.deleteMany({ where: { tecnicoId: userId } });
+        await tx.disponibilidade.createMany({
+          data: horarios.map((horario) => ({ horario, tecnicoId: userId })),
+        });
+      }
+
+      return tx.user.update({
+        where: { id: userId },
+        data: { ...userData },
+        include: { disponibilidades: true },
+      });
     });
 
     const { password, ...userWithoutPassword } = updatedUser;
@@ -157,38 +155,51 @@ class UserController {
     try {
       const tecnicos = await prisma.user.findMany({
         where: { role: "TECNICO" },
-        include: { disponibilidades: true },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          disponibilidades: {
+            select: { horario: true },
+          },
+        },
       });
 
       return response.status(200).json(tecnicos);
     } catch (error) {
-      next(error);
+      console.error("Erro ao listar técnicos:", error);
+      return response.status(500).json({ message: "Erro ao listar técnicos" });
     }
   }
 
-  async show(request: Request, response: Response) {
-    const { id } = request.params;
-    const userId = Array.isArray(id) ? id[0] : id;
+  async show(request: Request, response: Response, next: NextFunction) {
+    try {
+      const { id } = request.params;
+      const userId = Array.isArray(id) ? id[0] : id;
 
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        avatarUrl: true,
-        role: true,
-        disponibilidades: true, // se tiver relação com horários
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          avatarUrl: true,
+          role: true,
+          disponibilidades: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
 
-    if (!user) {
-      throw new AppError("Usuário não encontrado", 404);
+      if (!user) {
+        throw new AppError("Usuário não encontrado", 404);
+      }
+
+      return response.status(200).json(user);
+    } catch (error) {
+      next(error); // 🔹 garante que o servidor não caia
     }
-
-    return response.status(200).json(user);
   }
 
   async listClientes(request: Request, response: Response) {
