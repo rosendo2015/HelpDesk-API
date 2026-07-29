@@ -93,67 +93,47 @@ class UserController {
 
   async update(request: Request, response: Response) {
     const { id } = request.params;
-
     const userId = Array.isArray(id) ? id[0] : id;
 
-    // Log do ID recebido
-    console.log("🟢 Update chamado para userId:", userId);
-
-    // Schema com todos os campos opcionais
     const bodySchema = z.object({
-      name: z
-        .string()
-        .trim()
-        .min(3, { message: "O nome deve ter pelo menos 3 caracteres." })
-        .optional(),
+      name: z.string().trim().min(3).optional(),
       email: z.string().email().optional(),
       password: z.string().min(6).optional(),
       avatarUrl: z.string().url().optional(),
       role: z.enum(["ADMIN", "TECNICO", "CLIENTE"]).optional(),
+      horarios: z.array(z.string()).optional(), // ✅ adiciona horários
     });
 
     const data = bodySchema.parse(request.body);
 
-    // Log dos dados recebidos
-    console.log("📦 Dados recebidos no update:", request.body);
-    console.log("✅ Dados após parse:", data);
-
-    if (request.user?.role === "ADMIN") {
-      // ADMIN pode atualizar qualquer usuário
-    } else if (request.user?.role === "TECNICO") {
-      // TECNICO só pode atualizar o próprio perfil
-      if (request.user.id !== userId) {
-        throw new AppError(
-          "Você não tem permissão para atualizar outro usuário",
-          403,
-        );
-      }
-    } else {
-      // CLIENTE só pode atualizar o próprio perfil também
-      if (request.user?.id !== userId) {
-        throw new AppError(
-          "Você não tem permissão para atualizar outro usuário",
-          403,
-        );
-      }
-    }
-
     const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (!user) {
-      throw new AppError("Usuário não encontrado", 404);
-    }
+    if (!user) throw new AppError("Usuário não encontrado", 404);
 
-    if (data.password) {
-      data.password = await hash(data.password, 8);
+    const { horarios, ...userData } = data;
+
+    // Atualiza dados básicos
+    if (userData.password) {
+      userData.password = await hash(userData.password, 8);
     }
 
     const updatedUser = await prisma.user.update({
       where: { id: userId },
-      data,
+      data: {
+        ...userData,
+        // ✅ Atualiza disponibilidades junto com o usuário
+        ...(user.role === "TECNICO" && horarios
+          ? {
+              disponibilidades: {
+                set: [],
+                create: horarios.map((horario) => ({ horario })),
+              },
+            }
+          : {}),
+      },
+      include: { disponibilidades: true },
     });
 
     const { password, ...userWithoutPassword } = updatedUser;
-
     return response.status(200).json(userWithoutPassword);
   }
 
@@ -179,12 +159,36 @@ class UserController {
         where: { role: "TECNICO" },
         include: { disponibilidades: true },
       });
-      console.log(tecnicos);
 
       return response.status(200).json(tecnicos);
     } catch (error) {
       next(error);
     }
+  }
+
+  async show(request: Request, response: Response) {
+    const { id } = request.params;
+    const userId = Array.isArray(id) ? id[0] : id;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        avatarUrl: true,
+        role: true,
+        disponibilidades: true, // se tiver relação com horários
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    if (!user) {
+      throw new AppError("Usuário não encontrado", 404);
+    }
+
+    return response.status(200).json(user);
   }
 
   async listClientes(request: Request, response: Response) {
