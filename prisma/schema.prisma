@@ -59,17 +59,17 @@ model Chamado {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  adminId String
-  admin   User   @relation("ChamadosAdmin", fields: [adminId], references: [id])
+  adminId String?
+  admin   User?   @relation("ChamadosAdmin", fields: [adminId], references: [id])
 
   clienteId String
   cliente   User   @relation("ChamadosCliente", fields: [clienteId], references: [id], onDelete: Cascade)
 
-  tecnicoId String
-  tecnico   User   @relation("ChamadosTecnico", fields: [tecnicoId], references: [id])
+  tecnicoId         String?  // opcional
+  tecnico           User?    @relation("ChamadosTecnico", fields: [tecnicoId], references: [id]) // também opcional
 
-  disponibilidadeId String
-  disponibilidade Disponibilidade @relation(fields: [disponibilidadeId], references: [id])
+  disponibilidadeId String?  // opcional
+  disponibilidade   Disponibilidade? @relation(fields: [disponibilidadeId], references: [id]) // também opcional
 
   services   ChamadoService[]
   totalPrice Float?
@@ -95,8 +95,8 @@ model Disponibilidade {
   tecnicoId String
   horario   String
 
-  tecnico User @relation("DisponibilidadesDoTecnico", fields: [tecnicoId], references: [id], onDelete: Cascade)
-  chamados  Chamado[]   // <-- relação inversa
+  tecnico  User      @relation("DisponibilidadesDoTecnico", fields: [tecnicoId], references: [id], onDelete: Cascade)
+  chamados Chamado[] // relação inversa
 }
 
 enum Status {
