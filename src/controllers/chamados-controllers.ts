@@ -16,6 +16,7 @@ class ChamadosControllers {
     const chamadosFormatados = chamados.map((chamado) => ({
       id: chamado.id,
       title: chamado.title,
+      description: chamado.description,
       status: chamado.status,
       updatedAt: chamado.updatedAt,
       totalPrice: chamado.totalPrice,
@@ -44,12 +45,37 @@ class ChamadosControllers {
     });
     const totalPrice = servicos.reduce((acc, s) => acc + s.price, 0);
 
-    // 2. Criar chamado sem técnico/disponibilidade
+    // 2. Escolher admin automaticamente
+    const admins = await prisma.user.findMany({ where: { role: "ADMIN" } });
+    const adminEscolhido = admins[Math.floor(Math.random() * admins.length)];
+
+    // 3. Escolher técnico automaticamente
+    const tecnicos = await prisma.user.findMany({
+      where: { role: "TECNICO" },
+      include: { chamadosTecnico: true, disponibilidades: true },
+    });
+    const disponiveis = tecnicos.filter((t) => t.disponibilidades.length > 0);
+
+    const pool: typeof disponiveis = [];
+    disponiveis.forEach((t) => {
+      const ativos = t.chamadosTecnico.filter(
+        (c) => c.status !== "ENCERRADO",
+      ).length;
+      const peso = Math.max(1, 5 - ativos);
+      for (let i = 0; i < peso; i++) pool.push(t);
+    });
+
+    const tecnicoEscolhido = pool[Math.floor(Math.random() * pool.length)];
+    const disponibilidadeEscolhida = tecnicoEscolhido.disponibilidades[0];
+
+    // 4. Criar chamado já com os IDs automáticos
     try {
       const chamado = await prisma.chamado.create({
         data: {
           clienteId,
-
+          adminId: adminEscolhido.id,
+          tecnicoId: tecnicoEscolhido.id,
+          disponibilidadeId: disponibilidadeEscolhida.id,
           status: "ABERTO",
           totalPrice,
           title,
@@ -60,8 +86,6 @@ class ChamadosControllers {
           },
         },
       });
-
-      console.log("Chamado criado:", chamado);
 
       return response.status(201).json(chamado);
     } catch (error) {
