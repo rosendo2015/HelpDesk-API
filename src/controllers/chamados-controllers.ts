@@ -4,12 +4,39 @@ import { AppError } from "@/utils/AppError";
 
 class ChamadosControllers {
   async index(request: Request, response: Response) {
+    const { id, role } = request.user!;
+
+    let where = {};
+
+    switch (role) {
+      case "CLIENTE":
+        where = {
+          clienteId: id,
+        };
+        break;
+
+      case "TECNICO":
+        where = {
+          tecnicoId: id,
+        };
+        break;
+
+      case "ADMIN":
+        where = {};
+        break;
+    }
+
     const chamados = await prisma.chamado.findMany({
+      where,
       include: {
         disponibilidade: true,
         tecnico: true,
         cliente: true,
-        services: { include: { service: true } },
+        services: {
+          include: {
+            service: true,
+          },
+        },
       },
     });
 
