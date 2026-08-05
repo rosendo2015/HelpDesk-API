@@ -18,13 +18,21 @@ class ChamadosControllers {
       title: chamado.title,
       description: chamado.description,
       status: chamado.status,
+      createdAt: chamado.createdAt,
       updatedAt: chamado.updatedAt,
       totalPrice: chamado.totalPrice,
-      cliente: chamado.cliente.name,
-      tecnico: chamado.tecnico?.name,
+      cliente: { id: chamado.cliente.id, name: chamado.cliente.name },
+      tecnico: chamado.tecnico
+        ? {
+            id: chamado.tecnico.id,
+            name: chamado.tecnico.name,
+            email: chamado.tecnico.email,
+          }
+        : null,
       services: chamado.services.map((s) => ({
+        id: s.service.id,
         nome: s.service.name,
-        valor: s.service.price,
+        price: s.service.price,
       })),
     }));
 
@@ -32,7 +40,7 @@ class ChamadosControllers {
   }
 
   async create(request: Request, response: Response) {
-    const { services, title } = request.body;
+    const { services, title, description } = request.body;
     const clienteId = request.user?.id;
 
     if (!clienteId) {
@@ -48,6 +56,10 @@ class ChamadosControllers {
     // 2. Escolher admin automaticamente
     const admins = await prisma.user.findMany({ where: { role: "ADMIN" } });
     const adminEscolhido = admins[Math.floor(Math.random() * admins.length)];
+
+    if (!adminEscolhido) {
+      throw new AppError("Nenhum admin disponível", 400);
+    }
 
     // 3. Escolher técnico automaticamente
     const tecnicos = await prisma.user.findMany({
@@ -65,6 +77,10 @@ class ChamadosControllers {
       for (let i = 0; i < peso; i++) pool.push(t);
     });
 
+    if (pool.length === 0) {
+      throw new AppError("Nenhum técnico disponível", 400);
+    }
+
     const tecnicoEscolhido = pool[Math.floor(Math.random() * pool.length)];
     const disponibilidadeEscolhida = tecnicoEscolhido.disponibilidades[0];
 
@@ -79,6 +95,7 @@ class ChamadosControllers {
           status: "ABERTO",
           totalPrice,
           title,
+          description,
           services: {
             createMany: {
               data: services.map((serviceId: string) => ({ serviceId })),
@@ -87,7 +104,26 @@ class ChamadosControllers {
         },
       });
 
-      return response.status(201).json(chamado);
+      return response.status(201).json({
+        id: chamado.id,
+        title: chamado.title,
+        description: chamado.description,
+        status: chamado.status,
+        createdAt: chamado.createdAt,
+        updatedAt: chamado.updatedAt,
+        totalPrice: chamado.totalPrice,
+        cliente: {
+          id: clienteId,
+          name: (await prisma.user.findUnique({ where: { id: clienteId } }))
+            ?.name,
+        },
+        tecnico: { id: tecnicoEscolhido.id, name: tecnicoEscolhido.name },
+        services: servicos.map((s) => ({
+          id: s.id,
+          nome: s.name,
+          price: s.price,
+        })),
+      });
     } catch (error) {
       console.error("Erro ao criar chamado", error);
       return response.status(500).json({ message: "Erro interno", error });
@@ -97,8 +133,14 @@ class ChamadosControllers {
   async update(request: Request, response: Response) {
     const { id } = request.params;
     const chamadoId = Array.isArray(id) ? id[0] : id;
-    const { tecnicoId, disponibilidadeId, status, services, title } =
-      request.body;
+    const {
+      tecnicoId,
+      disponibilidadeId,
+      status,
+      services,
+      title,
+      description,
+    } = request.body;
 
     // 1. Verificar se o chamado existe
     const chamado = await prisma.chamado.findUnique({
@@ -145,9 +187,10 @@ class ChamadosControllers {
       data: {
         tecnicoId,
         disponibilidadeId,
-        status,
+        status: status ?? chamado.status,
         totalPrice,
         title,
+        description,
       },
       include: {
         disponibilidade: true,
