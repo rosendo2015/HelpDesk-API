@@ -9,15 +9,21 @@ const userAvatarController = new UserAvatarController();
 const upload = multer(uploadConfig.MULTER);
 
 userAvatarRoutes.post(
-    "/avatar",
-    ensureAuthenticated,
-    upload.single("file"),
-    userAvatarController.update
+  "/avatar",
+  ensureAuthenticated,
+  upload.single("file"),
+  userAvatarController.update,
 );
 userAvatarRoutes.get(
-    "/avatar",
-    ensureAuthenticated,
-    userAvatarController.index
+  "/avatar",
+  ensureAuthenticated,
+  userAvatarController.index,
+);
+
+userAvatarRoutes.delete(
+  "/avatar",
+  ensureAuthenticated,
+  userAvatarController.delete,
 );
 
 export { userAvatarRoutes };

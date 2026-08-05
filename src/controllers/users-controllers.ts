@@ -131,7 +131,7 @@ class UserController {
       });
     });
 
-    const { password, ...userWithoutPassword } = updatedUser;
+    const { password, ...userWithoutPassword } = user;
     return response.status(200).json(userWithoutPassword);
   }
 
