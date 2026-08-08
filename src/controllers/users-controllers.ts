@@ -1,7 +1,7 @@
 import { authConfig } from "@/configs/auth";
 import { prisma } from "@/database/prisma";
 import { AppError } from "@/utils/AppError";
-import { hash } from "bcrypt";
+import { compare, hash } from "bcrypt";
 import { Request, Response, NextFunction } from "express";
 import { SignOptions } from "jsonwebtoken";
 import jwt from "jsonwebtoken";
@@ -111,6 +111,8 @@ class UserController {
 
     const { horarios, ...userData } = data;
 
+    console.log(data);
+
     // Atualiza dados básicos
     if (userData.password) {
       userData.password = await hash(userData.password, 8);
@@ -131,8 +133,46 @@ class UserController {
       });
     });
 
-    const { password, ...userWithoutPassword } = user;
+    const { password, ...userWithoutPassword } = updatedUser;
     return response.status(200).json(userWithoutPassword);
+  }
+
+  async updatePassword(
+    request: Request,
+    response: Response,
+    next: NextFunction,
+  ) {
+    try {
+      const { id } = request.params;
+      const userId = Array.isArray(id) ? id[0] : id;
+      const bodySchema = z.object({
+        oldPassword: z.string().min(1, {
+          message: "Informe a senha atual. Não deve ficar em branco.",
+        }),
+        newPassword: z
+          .string()
+          .min(6, { message: "A nova senha deve ter no mínimo 6 caracteres" }),
+      });
+      const { oldPassword, newPassword } = bodySchema.parse(request.body);
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) {
+        throw new AppError("Usuário nãi encontrado", 404);
+      }
+      const passwordMatches = await compare(oldPassword, user.password);
+      if (!passwordMatches) {
+        throw new AppError("Senha atual incorreta.", 401);
+      }
+      const hashedPassword = await hash(newPassword, 8);
+      await prisma.user.update({
+        where: { id: userId },
+        data: { password: hashedPassword },
+      });
+      return response
+        .status(200)
+        .json({ message: "Senha atualizada com sucesso." });
+    } catch (error) {
+      next(error);
+    }
   }
 
   async listAdmins(request: Request, response: Response) {
@@ -202,19 +242,23 @@ class UserController {
     }
   }
 
-  async listClientes(request: Request, response: Response) {
-    const clientes = await prisma.user.findMany({
-      where: { role: "CLIENTE" },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+  async listClientes(request: Request, response: Response, next: NextFunction) {
+    try {
+      const clientes = await prisma.user.findMany({
+        where: { role: "CLIENTE" },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
 
-    return response.status(200).json(clientes);
+      return response.status(200).json(clientes);
+    } catch (error) {
+      next(error);
+    }
   }
 
   async delete(request: Request, response: Response, next: NextFunction) {

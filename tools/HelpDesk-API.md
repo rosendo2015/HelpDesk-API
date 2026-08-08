@@ -19,7 +19,7 @@ APP_API_URL="http://localhost:3333"
   "main": "index.js",
   "scripts": {
     "dev": "tsx --watch --env-file .env src/server.ts",
-     "generate-md": "node --loader ts-node/esm tools/generate-md.ts",
+    "generate-md": "node --loader ts-node/esm tools/generate-md.ts",
     "build": "tsc",
     "start": "node dist/server.js"
   },
@@ -41,12 +41,15 @@ APP_API_URL="http://localhost:3333"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
+    "@types/connect-livereload": "^0.6.3",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/livereload": "^0.9.5",
     "@types/multer": "^2.1.0",
     "@types/node": "^25.9.4",
     "@types/pg": "^8.20.0",
+    "livereload": "^0.10.3",
     "prisma": "^7.8.0",
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
@@ -78,27 +81,45 @@ export default defineConfig({
 ## src\app.ts
 
 ```ts
-import express from 'express'
-import { errorHandling } from '@/middleware/error-handling'
-import { routes } from '@/routes'
-import uploadConfig from "./configs/upload"
-import cors from "cors"
+import express from "express";
+import { errorHandling } from "@/middleware/error-handling";
+import { routes } from "@/routes";
+import uploadConfig from "./configs/upload";
+import cors from "cors";
+import { prisma } from "./database/prisma";
 
-const app = express()
+const app = express();
 
-// Permite requisições do frontend
-app.use(cors({
-    origin: 'http://localhost:5173', // ou '*' para liberar tudo (não recomendado em produção)
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    credentials: true
-}));
+app.use(
+  cors({
+    origin: "http://localhost:5173", // ou "*", se quiser liberar tudo
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
 
-app.use(express.json())
-app.use("/files", express.static(uploadConfig.UPLOADS_FOLDER))
-app.use(routes)
-app.use(errorHandling)
+app.use(express.json());
+app.use("/files", express.static(uploadConfig.UPLOADS_FOLDER));
 
-export { app }
+//rota para verificar se o BD está online
+app.get("/health", async (req, res) => {
+  try {
+    await prisma.$connect(); // garante que a conexão está ativa
+    await prisma.$queryRawUnsafe("SELECT 1"); // comando válido no Postgres
+    res.status(200).json({ status: "ok" });
+  } catch (err) {
+    console.error("Erro no health check:", err);
+    res.status(500).json({ status: "error", message: "DB indisponível" });
+  } finally {
+    await prisma.$disconnect(); // opcional, se quiser encerrar após o teste
+  }
+});
+
+app.use(routes);
+app.use(errorHandling);
+
+export { app };
+
 ```
 
 ## src\configs\auth.ts
@@ -161,196 +182,274 @@ export default {
 ## src\controllers\chamados-controllers.ts
 
 ```ts
-import { prisma } from "@/database/prisma"
-import { NextFunction, Request, Response } from "express"
-import { AppError } from "@/utils/AppError"
+import { prisma } from "@/database/prisma";
+import { NextFunction, Request, Response } from "express";
+import { AppError } from "@/utils/AppError";
 
 class ChamadosControllers {
-    async index(request: Request, response: Response) {
-        const chamados = await prisma.chamado.findMany({
-            include: {
-                disponibilidade: true,
-                tecnico: true,
-                cliente: true,
-                services: { include: { service: true } },
+  async index(request: Request, response: Response) {
+    const { id, role } = request.user!;
+
+    let where = {};
+
+    switch (role) {
+      case "CLIENTE":
+        where = {
+          clienteId: id,
+        };
+        break;
+
+      case "TECNICO":
+        where = {
+          tecnicoId: id,
+        };
+        break;
+
+      case "ADMIN":
+        where = {};
+        break;
+    }
+
+    const chamados = await prisma.chamado.findMany({
+      where,
+      include: {
+        disponibilidade: true,
+        tecnico: true,
+        cliente: true,
+        services: {
+          include: {
+            service: true,
+          },
+        },
+      },
+    });
+
+    const chamadosFormatados = chamados.map((chamado) => ({
+      id: chamado.id,
+      title: chamado.title,
+      description: chamado.description,
+      status: chamado.status,
+      createdAt: chamado.createdAt,
+      updatedAt: chamado.updatedAt,
+      totalPrice: chamado.totalPrice,
+      cliente: { id: chamado.cliente.id, name: chamado.cliente.name },
+      tecnico: chamado.tecnico
+        ? {
+            id: chamado.tecnico.id,
+            name: chamado.tecnico.name,
+            email: chamado.tecnico.email,
+          }
+        : null,
+      services: chamado.services.map((s) => ({
+        id: s.service.id,
+        nome: s.service.name,
+        price: s.service.price,
+      })),
+    }));
+
+    return response.json(chamadosFormatados);
+  }
+
+  async create(request: Request, response: Response) {
+    const { services, title, description } = request.body;
+    const clienteId = request.user?.id;
+
+    if (!clienteId) {
+      throw new AppError("Cliente não autenticado", 401);
+    }
+
+    // 1. Calcular preço total
+    const servicos = await prisma.service.findMany({
+      where: { id: { in: services } },
+    });
+    const totalPrice = servicos.reduce((acc, s) => acc + s.price, 0);
+
+    // 2. Escolher admin automaticamente
+    const admins = await prisma.user.findMany({ where: { role: "ADMIN" } });
+    const adminEscolhido = admins[Math.floor(Math.random() * admins.length)];
+
+    if (!adminEscolhido) {
+      throw new AppError("Nenhum admin disponível", 400);
+    }
+
+    // 3. Escolher técnico automaticamente
+    const tecnicos = await prisma.user.findMany({
+      where: { role: "TECNICO" },
+      include: { chamadosTecnico: true, disponibilidades: true },
+    });
+    const disponiveis = tecnicos.filter((t) => t.disponibilidades.length > 0);
+
+    const pool: typeof disponiveis = [];
+    disponiveis.forEach((t) => {
+      const ativos = t.chamadosTecnico.filter(
+        (c) => c.status !== "ENCERRADO",
+      ).length;
+      const peso = Math.max(1, 5 - ativos);
+      for (let i = 0; i < peso; i++) pool.push(t);
+    });
+
+    if (pool.length === 0) {
+      throw new AppError("Nenhum técnico disponível", 400);
+    }
+
+    const tecnicoEscolhido = pool[Math.floor(Math.random() * pool.length)];
+    const disponibilidadeEscolhida = tecnicoEscolhido.disponibilidades[0];
+
+    // 4. Criar chamado já com os IDs automáticos
+    try {
+      const chamado = await prisma.chamado.create({
+        data: {
+          clienteId,
+          adminId: adminEscolhido.id,
+          tecnicoId: tecnicoEscolhido.id,
+          disponibilidadeId: disponibilidadeEscolhida.id,
+          status: "ABERTO",
+          totalPrice,
+          title,
+          description,
+          services: {
+            createMany: {
+              data: services.map((serviceId: string) => ({ serviceId })),
             },
-        })
+          },
+        },
+      });
 
-        const chamadosFormatados = chamados.map(chamado => ({
-            id: chamado.id,
-            title: chamado.title,
-            status: chamado.status,
-            updatedAt: chamado.updatedAt,
-            totalPrice: chamado.totalPrice,
-            cliente: chamado.cliente.name,
-            tecnico: chamado.tecnico.name,
-            services: chamado.services.map(s => ({
-                nome: s.service.name,
-                valor: s.service.price,
-            })),
-        }))
+      return response.status(201).json({
+        id: chamado.id,
+        title: chamado.title,
+        description: chamado.description,
+        status: chamado.status,
+        createdAt: chamado.createdAt,
+        updatedAt: chamado.updatedAt,
+        totalPrice: chamado.totalPrice,
+        cliente: {
+          id: clienteId,
+          name: (await prisma.user.findUnique({ where: { id: clienteId } }))
+            ?.name,
+        },
+        tecnico: { id: tecnicoEscolhido.id, name: tecnicoEscolhido.name },
+        services: servicos.map((s) => ({
+          id: s.id,
+          nome: s.name,
+          price: s.price,
+        })),
+      });
+    } catch (error) {
+      console.error("Erro ao criar chamado", error);
+      return response.status(500).json({ message: "Erro interno", error });
+    }
+  }
 
+  async update(request: Request, response: Response) {
+    const { id } = request.params;
+    const chamadoId = Array.isArray(id) ? id[0] : id;
+    const {
+      tecnicoId,
+      disponibilidadeId,
+      status,
+      services,
+      title,
+      description,
+    } = request.body;
 
-
-        return response.json(chamadosFormatados)
+    // 1. Verificar se o chamado existe
+    const chamado = await prisma.chamado.findUnique({
+      where: { id: chamadoId },
+    });
+    if (!chamado) {
+      throw new AppError("Chamado não encontrado", 404);
     }
 
-    async create(request: Request, response: Response) {
-        const { tecnicoId, disponibilidadeId, adminId, services, title } = request.body
-        const clienteId = request.user?.id
+    // 2. Validar disponibilidade se informada junto com técnico
+    if (tecnicoId && disponibilidadeId) {
+      const disponibilidade = await prisma.disponibilidade.findUnique({
+        where: { id: disponibilidadeId },
+      });
 
-        if (!clienteId) {
-            throw new AppError("Cliente não autenticado", 401)
-        }
-
-        // 1. Validar se a disponibilidade existe e pertence ao técnico
-        const disponibilidade = await prisma.disponibilidade.findUnique({
-            where: { id: disponibilidadeId }
-        })
-
-        if (!disponibilidade || disponibilidade.tecnicoId !== tecnicoId) {
-            throw new AppError("Disponibilidade inválida para esse técnico", 400)
-        }
-
-        // 1.1 Verificar se já existe chamado vinculado a essa disponibilidade
-        const chamadoExistente = await prisma.chamado.findFirst({
-            where: { disponibilidadeId, status: { not: "ENCERRADO" } }
-        })
-
-        if (chamadoExistente) {
-            throw new AppError("Já existe um chamado para esse técnico nesse horário", 400)
-        }
-
-        // 2. Calcular preço total
-        const servicos = await prisma.service.findMany({
-            where: { id: { in: services } }
-        })
-        const totalPrice = servicos.reduce((acc, s) => acc + s.price, 0)
-
-        // 3. Criar chamado
-        const chamado = await prisma.chamado.create({
-            data: {
-                clienteId,
-                adminId,
-                tecnicoId,
-                disponibilidadeId,
-                status: "ABERTO",
-                totalPrice,
-                title,
-                services: {
-                    create: services.map((serviceId: string) => ({ serviceId }))
-                }
-            },
-            include: {
-                disponibilidade: true,
-                tecnico: true,
-                cliente: true,
-                services: { include: { service: true } }
-            }
-        })
-
-        return response.status(201).json(chamado)
+      if (!disponibilidade || disponibilidade.tecnicoId !== tecnicoId) {
+        throw new AppError("Disponibilidade inválida para esse técnico", 400);
+      }
     }
 
-    async update(request: Request, response: Response) {
-        const { id } = request.params
-        const chamadoId = Array.isArray(id) ? id[0] : id
-        const { tecnicoId, disponibilidadeId, status, services, title } = request.body
+    // 3. Atualizar serviços e recalcular preço se necessário
+    let totalPrice = chamado.totalPrice;
+    if (services && Array.isArray(services) && services.length > 0) {
+      const servicos = await prisma.service.findMany({
+        where: { id: { in: services } },
+      });
+      totalPrice = servicos.reduce((acc, s) => acc + s.price, 0);
 
-        // 1. Verificar se o chamado existe
-        const chamado = await prisma.chamado.findUnique({ where: { id: chamadoId } })
-        if (!chamado) {
-            throw new AppError("Chamado não encontrado", 404)
-        }
+      // Remove serviços antigos
+      await prisma.chamadoService.deleteMany({ where: { chamadoId } });
 
-        // 2. Validar disponibilidade se informada junto com técnico
-        if (tecnicoId && disponibilidadeId) {
-            const disponibilidade = await prisma.disponibilidade.findUnique({
-                where: { id: disponibilidadeId }
-            })
-
-            if (!disponibilidade || disponibilidade.tecnicoId !== tecnicoId) {
-                throw new AppError("Disponibilidade inválida para esse técnico", 400)
-            }
-        }
-
-        // 3. Atualizar serviços e recalcular preço se necessário
-        let totalPrice = chamado.totalPrice
-        if (services && Array.isArray(services) && services.length > 0) {
-            const servicos = await prisma.service.findMany({
-                where: { id: { in: services } }
-            })
-            totalPrice = servicos.reduce((acc, s) => acc + s.price, 0)
-
-            // Remove serviços antigos
-            await prisma.chamadoService.deleteMany({ where: { chamadoId } })
-
-            // Adiciona novos serviços
-            await prisma.chamadoService.createMany({
-                data: services.map((serviceId: string) => ({
-                    chamadoId,
-                    serviceId
-                }))
-            })
-        }
-
-        // 4. Atualizar chamado
-        const chamadoAtualizado = await prisma.chamado.update({
-            where: { id: chamadoId },
-            data: {
-                tecnicoId,
-                disponibilidadeId,
-                status,
-                totalPrice,
-                title
-            },
-            include: {
-                disponibilidade: true,
-                tecnico: true,
-                cliente: true,
-                services: { include: { service: true } }
-            }
-        })
-
-        return response.status(200).json(chamadoAtualizado)
+      // Adiciona novos serviços
+      await prisma.chamadoService.createMany({
+        data: services.map((serviceId: string) => ({
+          chamadoId,
+          serviceId,
+        })),
+      });
     }
 
-    async listByTecnico(request: Request, response: Response, next: NextFunction) {
-        try {
+    // 4. Atualizar chamado
+    const chamadoAtualizado = await prisma.chamado.update({
+      where: { id: chamadoId },
+      data: {
+        tecnicoId,
+        disponibilidadeId,
+        status: status ?? chamado.status,
+        totalPrice,
+        title,
+        description,
+      },
+      include: {
+        disponibilidade: true,
+        tecnico: true,
+        cliente: true,
+        services: { include: { service: true } },
+      },
+    });
 
-            const { id } = request.params
-            const tecnicoId = Array.isArray(id) ? id[0] : id
+    return response.status(200).json(chamadoAtualizado);
+  }
 
-            // Verifica se o técnico existe
-            const tecnico = await prisma.user.findUnique({
-                where: { id: tecnicoId }
-            })
+  async listByTecnico(
+    request: Request,
+    response: Response,
+    next: NextFunction,
+  ) {
+    try {
+      const { id } = request.params;
+      const tecnicoId = Array.isArray(id) ? id[0] : id;
 
-            if (!tecnico || tecnico.role !== "TECNICO") {
-                throw new AppError("Técnico não encontrado", 404)
-            }
-            // Busca os chamados atribuídos ao técnico
-            const chamados = await prisma.chamado.findMany({
-                where: { tecnicoId, status: { not: "ENCERRADO" } },
-                include: {
-                    disponibilidade: true,
-                    tecnico: true,
-                    cliente: true,
-                    services: { include: { service: true } }
-                }
-            })
+      // Verifica se o técnico existe
+      const tecnico = await prisma.user.findUnique({
+        where: { id: tecnicoId },
+      });
 
-            return response.status(200).json(chamados)
+      if (!tecnico || tecnico.role !== "TECNICO") {
+        throw new AppError("Técnico não encontrado", 404);
+      }
+      // Busca os chamados atribuídos ao técnico
+      const chamados = await prisma.chamado.findMany({
+        where: { tecnicoId, status: { not: "ENCERRADO" } },
+        include: {
+          disponibilidade: true,
+          tecnico: true,
+          cliente: true,
+          services: { include: { service: true } },
+        },
+      });
 
-        } catch (error) {
-            next(error)
-        }
+      return response.status(200).json(chamados);
+    } catch (error) {
+      next(error);
     }
-
-
+  }
 }
 
-export { ChamadosControllers }
+export { ChamadosControllers };
 
 ```
 
@@ -409,54 +508,66 @@ export { DisponibilidadesController }
 ## src\controllers\services-controller.ts
 
 ```ts
-import { prisma } from "@/database/prisma"
-import { Request, Response } from "express"
-import { AppError } from "@/utils/AppError"
+import { prisma } from "@/database/prisma";
+import { Request, Response } from "express";
+import { AppError } from "@/utils/AppError";
 
 class ServicesController {
-    async create(request: Request, response: Response) {
-        const { name, price, active } = request.body
-        const adminId = request.user?.id // pega do usuário logado
+  async create(request: Request, response: Response) {
+    const { name, price, active } = request.body;
+    const adminId = request.user?.id; // pega do usuário logado
 
-        if (!adminId) {
-            throw new AppError("Somente admin pode criar serviços", 403)
-        }
-
-        const service = await prisma.service.create({
-            data: {
-                name,
-                price,
-                active,
-                adminId
-            }
-        })
-
-        return response.status(201).json(service)
+    if (!adminId) {
+      throw new AppError("Somente admin pode criar serviços", 403);
     }
 
-    async index(request: Request, response: Response) {
-        const services = await prisma.service.findMany({
-            where: { active: true } // só lista serviços ativos
-        })
-        return response.json(services)
+    const service = await prisma.service.create({
+      data: {
+        name,
+        price,
+        active,
+        adminId,
+      },
+    });
+
+    return response.status(201).json(service);
+  }
+
+  async index(request: Request, response: Response) {
+    const includeInactive = request.query.includeInactive === "true";
+    const userRole = request.user?.role; // supondo que você tenha o role no objeto user
+
+    let services;
+
+    if (includeInactive) {
+      if (userRole !== "ADMIN") {
+        throw new AppError("Somente admin pode ver serviços inativos", 403);
+      }
+      services = await prisma.service.findMany(); // todos
+    } else {
+      services = await prisma.service.findMany({
+        where: { active: true }, // só ativos
+      });
     }
 
-    async update(request: Request, response: Response) {
-        const { id } = request.params
-        const userId = Array.isArray(id) ? id[0] : id
-        const { name, price, active } = request.body
+    return response.json(services);
+  }
 
-        const service = await prisma.service.update({
-            where: { id: userId },
-            data: { name, price, active }
-        })
+  async update(request: Request, response: Response) {
+    const { id } = request.params;
+    const userId = Array.isArray(id) ? id[0] : id;
+    const { name, price, active } = request.body;
 
-        return response.json(service)
-    }
+    const service = await prisma.service.update({
+      where: { id: userId },
+      data: { name, price, active },
+    });
+
+    return response.json(service);
+  }
 }
 
-export { ServicesController }
-
+export { ServicesController };
 
 ```
 
@@ -519,66 +630,124 @@ import path from "path";
 import uploadConfig from "@/configs/upload";
 
 class UserAvatarController {
-    async index(request: Request, response: Response, next: NextFunction) {
-        try {
-            if (!request.user) {
-                return response.status(401).json({ error: "Usuário não autenticado" });
-            }
+  async index(request: Request, response: Response, next: NextFunction) {
+    try {
+      if (!request.user) {
+        return response.status(401).json({ error: "Usuário não autenticado" });
+      }
 
-            const userId = request.user.id;
-            const user = await prisma.user.findUnique({
-                where: { id: userId },
-                select: { avatarUrl: true }
-            });
+      const userId = request.user.id;
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { avatarUrl: true },
+      });
 
-            if (!user || !user.avatarUrl) {
-                return response.status(404).json({ error: "Avatar não encontrado" });
-            }
+      if (!user || !user.avatarUrl) {
+        return response.status(404).json({ error: "Avatar não encontrado" });
+      }
 
-            // Caminho completo do arquivo
-            const filePath = path.resolve(uploadConfig.UPLOADS_FOLDER, user.avatarUrl);
+      // Caminho completo do arquivo
+      const filePath = path.resolve(
+        uploadConfig.UPLOADS_FOLDER,
+        user.avatarUrl,
+      );
 
-            // Envia o arquivo diretamente
-            return response.sendFile(filePath);
-        } catch (error) {
-            console.log(error);
-            next(error);
-        }
+      // Envia o arquivo diretamente
+      return response.sendFile(filePath);
+    } catch (error) {
+      console.log(error);
+      next(error);
     }
-    async update(request: Request, response: Response, next: NextFunction) {
-        try {
+  }
+  async update(request: Request, response: Response, next: NextFunction) {
+    try {
+      const diskStorage = new DiskStorage();
 
-            const diskStorage = new DiskStorage();
+      if (!request.user) {
+        return response.status(401).json({ error: "Usuário não autenticado" });
+      }
+      const userId = request.user.id; // vem do middleware de autenticação
 
-            if (!request.user) {
-                return response.status(401).json({ error: "Usuário não autenticado" });
-            }
-            const userId = request.user.id; // vem do middleware de autenticação
+      if (!request.file) {
+        return response.status(400).json({ error: "Nenhum arquivo enviado" });
+      }
 
-            if (!request.file) {
-                return response.status(400).json({ error: "Nenhum arquivo enviado" });
-            }
+      //Busca o arquivo antigo antes de substituir
+      const user = await prisma.user.findUnique({
+        where: {
+          id: userId,
+        },
+        select: {
+          avatarUrl: true,
+        },
+      });
+      // Salva o novo arquivo
+      const filename = await diskStorage.saveFile(request.file.filename);
 
-            // Salva o arquivo
-            const filename = await diskStorage.saveFile(request.file.filename);
+      // Atualiza o banco com novo avatar
+      await prisma.user.update({
+        where: { id: userId },
+        data: { avatarUrl: filename },
+      });
 
-            // Atualiza o usuário no banco
-            const user = await prisma.user.update({
-                where: { id: userId },
-                data: { avatarUrl: filename }
-            });
+      // Deleta o avatar antigo
+      if (user?.avatarUrl) {
+        await diskStorage.deleteFile(user.avatarUrl, "upload");
+      }
 
-            return response.status(200).json({
-                message: "Avatar atualizado com sucesso!",
-                avatarUrl: user.avatarUrl
-            });
-
-        } catch (error) {
-            console.log(error)
-            next(error)
-        }
-
+      return response.status(200).json({ avatarUrl: filename });
+    } catch (error) {
+      console.log(error);
+      next(error);
     }
+  }
+  async delete(request: Request, response: Response, next: NextFunction) {
+    try {
+      const diskStorage = new DiskStorage();
+
+      if (!request.user) {
+        return response.status(401).json({
+          error: "Usuário não autenticado",
+        });
+      }
+
+      const userId = request.user.id;
+
+      // Busca avatar atual
+      const user = await prisma.user.findUnique({
+        where: {
+          id: userId,
+        },
+        select: {
+          avatarUrl: true,
+        },
+      });
+
+      if (!user?.avatarUrl) {
+        return response.status(404).json({
+          error: "Usuário não possui avatar",
+        });
+      }
+
+      // Remove arquivo físico
+      await diskStorage.deleteFile(user.avatarUrl, "upload");
+
+      // Remove referência no banco
+      const updatedUser = await prisma.user.update({
+        where: {
+          id: userId,
+        },
+        data: {
+          avatarUrl: null,
+        },
+      });
+
+      return response.status(200).json(updatedUser);
+    } catch (error) {
+      console.log(error);
+      next(error);
+    }
+  }
 }
 
 export { UserAvatarController };
@@ -588,239 +757,289 @@ export { UserAvatarController };
 ## src\controllers\users-controllers.ts
 
 ```ts
-import { authConfig } from "@/configs/auth"
-import { prisma } from "@/database/prisma"
-import { AppError } from "@/utils/AppError"
-import { hash } from "bcrypt"
-import { Request, Response, NextFunction } from "express"
-import { SignOptions } from "jsonwebtoken"
-import jwt from "jsonwebtoken"
-import z from "zod"
+import { authConfig } from "@/configs/auth";
+import { prisma } from "@/database/prisma";
+import { AppError } from "@/utils/AppError";
+import { hash } from "bcrypt";
+import { Request, Response, NextFunction } from "express";
+import { SignOptions } from "jsonwebtoken";
+import jwt from "jsonwebtoken";
+import z from "zod";
 
 class UserController {
-    async index(request: Request, response: Response, next: NextFunction) {
-        const users = await prisma.user.findMany({
-            select: {
-                id: true,
-                name: true,
-                email: true,
-                avatarUrl: true,
-                role: true,
-                createdAt: true,
-                updatedAt: true,
-            },
+  async index(request: Request, response: Response, next: NextFunction) {
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        avatarUrl: true,
+        role: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return response.status(200).json(users);
+  }
+
+  async create(request: Request, response: Response, next: NextFunction) {
+    try {
+      const bodySchema = z.object({
+        name: z
+          .string()
+          .trim()
+          .min(3, { message: "O nome deve ter pelo menos 3 caracteres." }),
+        email: z.string().email(),
+        password: z.string().min(6),
+        role: z.enum(["ADMIN", "TECNICO", "CLIENTE"]),
+        horarios: z.array(z.string()).optional(), // <-- adiciona horários opcionais
+      });
+
+      const { name, email, password, role, horarios } = bodySchema.parse(
+        request.body,
+      );
+
+      const userWithSameEmail = await prisma.user.findUnique({
+        where: { email },
+      });
+      if (userWithSameEmail) throw new AppError("Email já existe", 400);
+
+      const hashedPassword = await hash(password, 8);
+
+      const defaultHours = [
+        "08:00",
+        "09:00",
+        "10:00",
+        "11:00",
+        "14:00",
+        "15:00",
+        "16:00",
+        "17:00",
+      ];
+
+      const user = await prisma.user.create({
+        data: { name, email, password: hashedPassword, role },
+      });
+
+      // Popula a tabela Disponibilidade para técnicos
+      if (role === "TECNICO") {
+        const horasParaSalvar =
+          horarios && horarios.length > 0 ? horarios : defaultHours;
+
+        await prisma.disponibilidade.createMany({
+          data: horasParaSalvar.map((horario) => ({
+            horario,
+            tecnicoId: user.id,
+          })),
+        });
+      }
+
+      // Gera token JWT
+      const { secret, expiresIn } = authConfig.jwt;
+      const options: SignOptions = {
+        subject: String(user.id),
+        expiresIn: expiresIn as any,
+      };
+      const token = jwt.sign({ role: user.role }, secret, options);
+
+      const { password: _, ...userWithoutPassword } = user;
+      return response.status(201).json({ user: userWithoutPassword, token });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async update(request: Request, response: Response) {
+    const { id } = request.params;
+    const userId = Array.isArray(id) ? id[0] : id;
+
+    const bodySchema = z.object({
+      name: z.string().trim().min(3).optional(),
+      email: z.string().email().optional(),
+      password: z.string().min(6).optional(),
+      avatarUrl: z.string().url().optional(),
+      role: z.enum(["ADMIN", "TECNICO", "CLIENTE"]).optional(),
+      horarios: z.array(z.string()).optional(), // ✅ adiciona horários
+    });
+
+    const data = bodySchema.parse(request.body);
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError("Usuário não encontrado", 404);
+
+    const { horarios, ...userData } = data;
+
+    // Atualiza dados básicos
+    if (userData.password) {
+      userData.password = await hash(userData.password, 8);
+    }
+
+    const updatedUser = await prisma.$transaction(async (tx) => {
+      if (user.role === "TECNICO" && horarios) {
+        await tx.disponibilidade.deleteMany({ where: { tecnicoId: userId } });
+        await tx.disponibilidade.createMany({
+          data: horarios.map((horario) => ({ horario, tecnicoId: userId })),
+        });
+      }
+
+      return tx.user.update({
+        where: { id: userId },
+        data: { ...userData },
+        include: { disponibilidades: true },
+      });
+    });
+
+    const { password, ...userWithoutPassword } = user;
+    return response.status(200).json(userWithoutPassword);
+  }
+
+  async listAdmins(request: Request, response: Response) {
+    // Busca todos os usuários com role ADMIN
+    const admins = await prisma.user.findMany({
+      where: { role: "ADMIN" },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return response.status(200).json(admins);
+  }
+
+  async listTecnicos(request: Request, response: Response, next: NextFunction) {
+    try {
+      const tecnicos = await prisma.user.findMany({
+        where: { role: "TECNICO" },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          disponibilidades: {
+            select: { horario: true },
+          },
+        },
+      });
+
+      return response.status(200).json(tecnicos);
+    } catch (error) {
+      console.error("Erro ao listar técnicos:", error);
+      return response.status(500).json({ message: "Erro ao listar técnicos" });
+    }
+  }
+
+  async show(request: Request, response: Response, next: NextFunction) {
+    try {
+      const { id } = request.params;
+      const userId = Array.isArray(id) ? id[0] : id;
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          avatarUrl: true,
+          role: true,
+          disponibilidades: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      if (!user) {
+        throw new AppError("Usuário não encontrado", 404);
+      }
+
+      return response.status(200).json(user);
+    } catch (error) {
+      next(error); // 🔹 garante que o servidor não caia
+    }
+  }
+
+  async listClientes(request: Request, response: Response) {
+    const clientes = await prisma.user.findMany({
+      where: { role: "CLIENTE" },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return response.status(200).json(clientes);
+  }
+
+  async delete(request: Request, response: Response, next: NextFunction) {
+    try {
+      const { id } = request.params;
+      const userId = Array.isArray(id) ? id[0] : id;
+
+      if (request.user?.role !== "ADMIN") {
+        throw new AppError("Você não tem permissão para excluir usuários", 403);
+      }
+
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) {
+        throw new AppError("Usuário não encontrado", 404);
+      }
+
+      // Agora permite excluir ADMIN, TECNICO e CLIENTE
+      if (user.role === "ADMIN") {
+        await prisma.user.delete({ where: { id: userId } });
+        return response
+          .status(200)
+          .json({ message: "Administrador excluído com sucesso" });
+      }
+
+      if (user.role === "TECNICO") {
+        // Verifica se existem chamados atribuídos ao técnico
+        const chamadosDoTecnico = await prisma.chamado.findMany({
+          where: { tecnicoId: userId },
         });
 
-        return response.status(200).json(users);
-    }
-
-    async create(request: Request, response: Response, next: NextFunction) {
-        try {
-            const bodySchema = z.object({
-                name: z.string().trim().min(3, { message: "O nome deve ter pelo menos 3 caracteres." }),
-                email: z.string().email(),
-                password: z.string().min(6),
-                role: z.enum(["ADMIN", "TECNICO", "CLIENTE"])
-            });
-
-            const { name, email, password, role } = bodySchema.parse(request.body);
-
-            const userWithSameEmail = await prisma.user.findUnique({ where: { email } });
-            if (userWithSameEmail) {
-                throw new AppError("Email já existe", 400);
-            }
-
-            const hashedPassword = await hash(password, 8);
-
-            const defaultHours = ["08:00", "09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"];
-
-            const user = await prisma.user.create({
-                data: { name, email, password: hashedPassword, role }
-            });
-
-            // Popula a tabela Disponibilidade para técnicos
-            if (role === "TECNICO") {
-                await prisma.disponibilidade.createMany({
-                    data: defaultHours.map(horario => ({
-                        horario,
-                        tecnicoId: user.id
-                    }))
-                });
-            }
-
-            // 🔐 Gera token JWT padronizado
-            const { secret, expiresIn } = authConfig.jwt;
-            const options: SignOptions = {
-                subject: String(user.id),
-                expiresIn: expiresIn as any // ✅ Corrige o tipo para evitar erro TS
-            };
-            const token = jwt.sign({ role: user.role }, secret, options);
-
-            const { password: _, ...userWithoutPassword } = user;
-
-            return response.status(201).json({ user: userWithoutPassword, token });
-        } catch (error) {
-            console.log("Erro no create:", error)
-            next(error);
-        }
-    }
-
-    async update(request: Request, response: Response) {
-        const { id } = request.params
-
-        const userId = Array.isArray(id) ? id[0] : id
-
-        // Schema com todos os campos opcionais
-        const bodySchema = z.object({
-            name: z.string().trim().min(3, { message: "O nome deve ter pelo menos 3 caracteres." }).optional(),
-            email: z.string().email().optional(),
-            password: z.string().min(6).optional(),
-            avatarUrl: z.string().url().optional(),
-            role: z.enum(["ADMIN", "TECNICO", "CLIENTE"]).optional()
-        })
-
-        const data = bodySchema.parse(request.body)
-
-        if (request.user?.role === "ADMIN") {
-            // ADMIN pode atualizar qualquer usuário
-        } else if (request.user?.role === "TECNICO") {
-            // TECNICO só pode atualizar o próprio perfil
-            if (request.user.id !== userId) {
-                throw new AppError("Você não tem permissão para atualizar outro usuário", 403);
-            }
-        } else {
-            // CLIENTE só pode atualizar o próprio perfil também
-            if (request.user?.id !== userId) {
-                throw new AppError("Você não tem permissão para atualizar outro usuário", 403);
-            }
+        if (chamadosDoTecnico.length > 0) {
+          throw new AppError(
+            "Este técnico possui chamados atribuídos. Reatribua os chamados a outro técnico antes de excluir.",
+            400,
+          );
         }
 
-        const user = await prisma.user.findUnique({ where: { id: userId } })
-        if (!user) {
-            throw new AppError("Usuário não encontrado", 404)
-        }
+        // Se não houver chamados, pode excluir as disponibilidades e o usuário
+        await prisma.disponibilidade.deleteMany({
+          where: { tecnicoId: userId },
+        });
+        await prisma.user.delete({ where: { id: userId } });
 
-        if (data.password) {
-            data.password = await hash(data.password, 8)
-        }
+        return response
+          .status(200)
+          .json({ message: "Técnico excluído com sucesso" });
+      }
 
-        const updatedUser = await prisma.user.update({
-            where: { id: userId },
-            data
-        })
-
-        const { password, ...userWithoutPassword } = updatedUser
-
-        return response.status(200).json(userWithoutPassword)
-
+      if (user.role === "CLIENTE") {
+        await prisma.chamadoService.deleteMany({
+          where: { chamado: { clienteId: userId } },
+        });
+        await prisma.user.delete({ where: { id: userId } });
+        return response
+          .status(200)
+          .json({ message: "Cliente excluído com sucesso" });
+      }
+      console.log("=== Role recebido do banco: ==== ", user.role);
+      throw new AppError("Tipo de usuário não suportado para exclusão", 400);
+    } catch (error) {
+      next(error);
     }
-
-    async listAdmins(request: Request, response: Response) {
-        // Busca todos os usuários com role ADMIN
-        const admins = await prisma.user.findMany({
-            where: { role: "ADMIN" },
-            select: {
-                id: true,
-                name: true,
-                email: true,
-                createdAt: true,
-                updatedAt: true
-            }
-        })
-
-        return response.status(200).json(admins)
-    }
-
-    async listTecnicos(request: Request, response: Response, next: NextFunction) {
-        try {
-            const tecnicos = await prisma.user.findMany({
-                where: { role: "TECNICO" },
-                select: {
-                    id: true,
-                    name: true,
-                    email: true,
-                    createdAt: true,
-                    updatedAt: true
-                }
-            })
-
-            return response.status(200).json(tecnicos)
-
-        } catch (error) {
-            next(error)
-        }
-    }
-
-    async listClientes(request: Request, response: Response) {
-        const clientes = await prisma.user.findMany({
-            where: { role: "CLIENTE" },
-            select: {
-                id: true,
-                name: true,
-                email: true,
-                createdAt: true,
-                updatedAt: true
-            }
-        })
-
-        return response.status(200).json(clientes)
-    }
-
-    async delete(request: Request, response: Response, next: NextFunction) {
-        try {
-            const { id } = request.params
-            const userId = Array.isArray(id) ? id[0] : id
-
-            if (request.user?.role !== "ADMIN") {
-                throw new AppError("Você não tem permissão para excluir usuários", 403)
-            }
-
-            const user = await prisma.user.findUnique({ where: { id: userId } })
-            if (!user) {
-                throw new AppError("Usuário não encontrado", 404)
-            }
-
-            // Agora permite excluir ADMIN, TECNICO e CLIENTE
-            if (user.role === "ADMIN") {
-                await prisma.user.delete({ where: { id: userId } })
-                return response.status(200).json({ message: "Administrador excluído com sucesso" })
-            }
-
-            if (user.role === "TECNICO") {
-                // Verifica se existem chamados atribuídos ao técnico
-                const chamadosDoTecnico = await prisma.chamado.findMany({
-                    where: { tecnicoId: userId }
-                })
-
-                if (chamadosDoTecnico.length > 0) {
-                    throw new AppError(
-                        "Este técnico possui chamados atribuídos. Reatribua os chamados a outro técnico antes de excluir.",
-                        400
-                    )
-                }
-
-                // Se não houver chamados, pode excluir as disponibilidades e o usuário
-                await prisma.disponibilidade.deleteMany({ where: { tecnicoId: userId } })
-                await prisma.user.delete({ where: { id: userId } })
-
-                return response.status(200).json({ message: "Técnico excluído com sucesso" })
-            }
-
-
-            if (user.role === "CLIENTE") {
-                await prisma.chamadoService.deleteMany({ where: { chamado: { clienteId: userId } } })
-                await prisma.user.delete({ where: { id: userId } })
-                return response.status(200).json({ message: "Cliente excluído com sucesso" })
-            }
-            console.log("Role recebido do banco:", user.role)
-            throw new AppError("Tipo de usuário não suportado para exclusão", 400)
-        } catch (error) {
-            next(error)
-        }
-
-    }
+  }
 }
-export { UserController }
+export { UserController };
+
 ```
 
 ## src\database\prisma.ts
@@ -969,36 +1188,39 @@ import uploadConfig from "@/configs/upload";
 import fs from "node:fs";
 import path from "node:path";
 
-
 class DiskStorage {
-    async saveFile(file: string) {
-        const tmpPath = path.resolve(uploadConfig.TMP_FOLDER, file)
-        const destPath = path.resolve(uploadConfig.UPLOADS_FOLDER, file)
-        try {
-            await fs.promises.access(tmpPath)
-        } catch (error) {
-            console.log(error)
-            throw new Error(`Arquivo não encontrado: ${tmpPath}`)
-        }
-        await fs.promises.mkdir(uploadConfig.UPLOADS_FOLDER, { recursive: true })
-        await fs.promises.rename(tmpPath, destPath)
-        return file
+  async saveFile(file: string) {
+    const tmpPath = path.resolve(uploadConfig.TMP_FOLDER, file);
+    const destPath = path.resolve(uploadConfig.UPLOADS_FOLDER, file);
+    try {
+      await fs.promises.access(tmpPath);
+    } catch (error) {
+      console.log(error);
+      throw new Error(`Arquivo não encontrado: ${tmpPath}`);
     }
+    await fs.promises.mkdir(uploadConfig.UPLOADS_FOLDER, { recursive: true });
+    await fs.promises.rename(tmpPath, destPath);
+    return file;
+  }
 
-    async deleteFile(file: string, type: "tmp" | "upload") {
-        const pathFile = type === "tmp" ? uploadConfig.TMP_FOLDER : uploadConfig.UPLOADS_FOLDER
-        const filePath = path.resolve(pathFile, file)
-        try {
-            await fs.promises.stat(filePath)
-        } catch (error) {
-            console.log(error)
-            throw new Error(`arquivo não encontrado: ${filePath}`)
-        }
-        await fs.promises.unlink(filePath)
+  async deleteFile(file: string, type: "tmp" | "upload") {
+    const folder =
+      type === "tmp" ? uploadConfig.TMP_FOLDER : uploadConfig.UPLOADS_FOLDER;
+
+    const filePath = path.resolve(folder, file);
+
+    try {
+      await fs.promises.unlink(filePath);
+    } catch (error: any) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
     }
+  }
 }
 
-export { DiskStorage }
+export { DiskStorage };
+
 ```
 
 ## src\routes\chamados-routes.ts
@@ -1151,15 +1373,21 @@ const userAvatarController = new UserAvatarController();
 const upload = multer(uploadConfig.MULTER);
 
 userAvatarRoutes.post(
-    "/avatar",
-    ensureAuthenticated,
-    upload.single("file"),
-    userAvatarController.update
+  "/avatar",
+  ensureAuthenticated,
+  upload.single("file"),
+  userAvatarController.update,
 );
 userAvatarRoutes.get(
-    "/avatar",
-    ensureAuthenticated,
-    userAvatarController.index
+  "/avatar",
+  ensureAuthenticated,
+  userAvatarController.index,
+);
+
+userAvatarRoutes.delete(
+  "/avatar",
+  ensureAuthenticated,
+  userAvatarController.delete,
 );
 
 export { userAvatarRoutes };
@@ -1169,82 +1397,110 @@ export { userAvatarRoutes };
 ## src\routes\users-routes.ts
 
 ```ts
-import { Router } from "express"
-import { UserController } from "@/controllers/users-controllers"
-import { ensureAuthenticated } from "@/middleware/ensure-authenticated"
-import { verifyUserAuthorization } from "@/middleware/verifyUserAuthorization"
-import { asyncHandler } from "@/utils/asyncHandler"
-import { prisma } from "@/database/prisma"
+import { Router } from "express";
+import { UserController } from "@/controllers/users-controllers";
+import { ensureAuthenticated } from "@/middleware/ensure-authenticated";
+import { verifyUserAuthorization } from "@/middleware/verifyUserAuthorization";
+import { asyncHandler } from "@/utils/asyncHandler";
+import { prisma } from "@/database/prisma";
 
-const usersRoutes = Router()
-const userController = new UserController()
+const usersRoutes = Router();
+const userController = new UserController();
+
+/* -------------------------
+   🔹 ROTAS DE LISTAGEM
+------------------------- */
 
 // Listar todos os usuários (somente ADMIN)
-usersRoutes.get("/", asyncHandler(async (req, res, next) => {
+usersRoutes.get(
+  "/",
+  asyncHandler(async (req, res, next) => {
     ensureAuthenticated(req, res, () => {
-        verifyUserAuthorization(["ADMIN"])(req, res, async () => {
-            await userController.index(req, res, next)
-        })
-    })
-}))
+      verifyUserAuthorization(["ADMIN"])(req, res, async () => {
+        await userController.index(req, res, next);
+      });
+    });
+  }),
+);
+
+// Listar todos os administradores
+usersRoutes.get("/admins", ensureAuthenticated, userController.listAdmins);
+
+// Listar todos os técnicos
+usersRoutes.get("/tecnicos", ensureAuthenticated, userController.listTecnicos);
+
+// Listar todos os clientes
+usersRoutes.get("/clientes", ensureAuthenticated, userController.listClientes);
+
+/* -------------------------
+   🔹 ROTAS DE CONSULTA INDIVIDUAL
+------------------------- */
+
+// Buscar um único usuário
+usersRoutes.get(
+  "/:id",
+  asyncHandler(async (req, res, next) => {
+    ensureAuthenticated(req, res, async () => {
+      await userController.show(req, res, next);
+    });
+  }),
+);
+
+// Atualizar usuário (Admin pode atualizar qualquer um, Técnico/Cliente só o próprio)
+usersRoutes.patch(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    ensureAuthenticated(req, res, async () => {
+      await userController.update(req, res);
+    });
+  }),
+);
+
+// Excluir usuário (Admin pode excluir Admin, Técnico ou Cliente)
+usersRoutes.delete(
+  "/:id",
+  asyncHandler(async (req, res, next) => {
+    ensureAuthenticated(req, res, () => {
+      verifyUserAuthorization(["ADMIN"])(req, res, async () => {
+        await userController.delete(req, res, next);
+      });
+    });
+  }),
+);
+
+/* -------------------------
+   🔹 ROTAS DE CRIAÇÃO
+------------------------- */
 
 // Criar usuário (Admin, Técnico ou Cliente)
-usersRoutes.post("/", asyncHandler(async (req, res, next) => {
+usersRoutes.post(
+  "/",
+  asyncHandler(async (req, res, next) => {
     const { role } = req.body;
 
     // Permite cadastro público de CLIENTE
     if (role === "CLIENTE") {
-        return userController.create(req, res, next);
+      return userController.create(req, res, next);
     }
 
     // Mantém regra para ADMIN e TECNICO
-    const adminExists = await prisma.user.findFirst({ where: { role: "ADMIN" } });
+    const adminExists = await prisma.user.findFirst({
+      where: { role: "ADMIN" },
+    });
+
     if (!adminExists && role === "ADMIN") {
-        return userController.create(req, res, next);
+      return userController.create(req, res, next);
     }
 
     ensureAuthenticated(req, res, () => {
-        verifyUserAuthorization(["ADMIN"])(req, res, async () => {
-            await userController.create(req, res, next);
-        });
+      verifyUserAuthorization(["ADMIN"])(req, res, async () => {
+        await userController.create(req, res, next);
+      });
     });
-}));
+  }),
+);
 
-
-// Atualizar usuário (Admin pode atualizar qualquer um, Técnico/Cliente só o próprio)
-usersRoutes.patch("/:id", asyncHandler(async (req, res) => {
-    ensureAuthenticated(req, res, async () => {
-        await userController.update(req, res)
-    })
-}))
-
-// Listar todos os administradores
-usersRoutes.get("/admins",
-    ensureAuthenticated, // só usuários logados podem acessar
-    userController.listAdmins
-)
-
-// Listar todos os técnicos
-usersRoutes.get("/tecnicos",
-    ensureAuthenticated,
-    userController.listTecnicos
-)
-// Listar todos os clientes
-usersRoutes.get("/clientes",
-    ensureAuthenticated,
-    userController.listClientes
-)
-
-// Excluir usuário (Admin pode excluir Admin, Técnico ou Cliente)
-usersRoutes.delete("/:id", asyncHandler(async (req, res, next) => {
-    ensureAuthenticated(req, res, () => {
-        verifyUserAuthorization(["ADMIN"])(req, res, async () => {
-            await userController.delete(req, res, next)
-        })
-    })
-}))
-
-export { usersRoutes }
+export { usersRoutes };
 
 ```
 
@@ -1403,7 +1659,7 @@ APP_API_URL="http://localhost:3333"
   "main": "index.js",
   "scripts": {
     "dev": "tsx --watch --env-file .env src/server.ts",
-     "generate-md": "node --loader ts-node/esm tools/generate-md.ts",
+    "generate-md": "node --loader ts-node/esm tools/generate-md.ts",
     "build": "tsc",
     "start": "node dist/server.js"
   },
@@ -1425,12 +1681,15 @@ APP_API_URL="http://localhost:3333"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
+    "@types/connect-livereload": "^0.6.3",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/livereload": "^0.9.5",
     "@types/multer": "^2.1.0",
     "@types/node": "^25.9.4",
     "@types/pg": "^8.20.0",
+    "livereload": "^0.10.3",
     "prisma": "^7.8.0",
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
@@ -1462,27 +1721,45 @@ export default defineConfig({
 ## src\app.ts
 
 ```ts
-import express from 'express'
-import { errorHandling } from '@/middleware/error-handling'
-import { routes } from '@/routes'
-import uploadConfig from "./configs/upload"
-import cors from "cors"
+import express from "express";
+import { errorHandling } from "@/middleware/error-handling";
+import { routes } from "@/routes";
+import uploadConfig from "./configs/upload";
+import cors from "cors";
+import { prisma } from "./database/prisma";
 
-const app = express()
+const app = express();
 
-// Permite requisições do frontend
-app.use(cors({
-    origin: 'http://localhost:5173', // ou '*' para liberar tudo (não recomendado em produção)
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    credentials: true
-}));
+app.use(
+  cors({
+    origin: "http://localhost:5173", // ou "*", se quiser liberar tudo
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
 
-app.use(express.json())
-app.use("/files", express.static(uploadConfig.UPLOADS_FOLDER))
-app.use(routes)
-app.use(errorHandling)
+app.use(express.json());
+app.use("/files", express.static(uploadConfig.UPLOADS_FOLDER));
 
-export { app }
+//rota para verificar se o BD está online
+app.get("/health", async (req, res) => {
+  try {
+    await prisma.$connect(); // garante que a conexão está ativa
+    await prisma.$queryRawUnsafe("SELECT 1"); // comando válido no Postgres
+    res.status(200).json({ status: "ok" });
+  } catch (err) {
+    console.error("Erro no health check:", err);
+    res.status(500).json({ status: "error", message: "DB indisponível" });
+  } finally {
+    await prisma.$disconnect(); // opcional, se quiser encerrar após o teste
+  }
+});
+
+app.use(routes);
+app.use(errorHandling);
+
+export { app };
+
 ```
 
 ## src\configs\auth.ts
@@ -1545,196 +1822,274 @@ export default {
 ## src\controllers\chamados-controllers.ts
 
 ```ts
-import { prisma } from "@/database/prisma"
-import { NextFunction, Request, Response } from "express"
-import { AppError } from "@/utils/AppError"
+import { prisma } from "@/database/prisma";
+import { NextFunction, Request, Response } from "express";
+import { AppError } from "@/utils/AppError";
 
 class ChamadosControllers {
-    async index(request: Request, response: Response) {
-        const chamados = await prisma.chamado.findMany({
-            include: {
-                disponibilidade: true,
-                tecnico: true,
-                cliente: true,
-                services: { include: { service: true } },
+  async index(request: Request, response: Response) {
+    const { id, role } = request.user!;
+
+    let where = {};
+
+    switch (role) {
+      case "CLIENTE":
+        where = {
+          clienteId: id,
+        };
+        break;
+
+      case "TECNICO":
+        where = {
+          tecnicoId: id,
+        };
+        break;
+
+      case "ADMIN":
+        where = {};
+        break;
+    }
+
+    const chamados = await prisma.chamado.findMany({
+      where,
+      include: {
+        disponibilidade: true,
+        tecnico: true,
+        cliente: true,
+        services: {
+          include: {
+            service: true,
+          },
+        },
+      },
+    });
+
+    const chamadosFormatados = chamados.map((chamado) => ({
+      id: chamado.id,
+      title: chamado.title,
+      description: chamado.description,
+      status: chamado.status,
+      createdAt: chamado.createdAt,
+      updatedAt: chamado.updatedAt,
+      totalPrice: chamado.totalPrice,
+      cliente: { id: chamado.cliente.id, name: chamado.cliente.name },
+      tecnico: chamado.tecnico
+        ? {
+            id: chamado.tecnico.id,
+            name: chamado.tecnico.name,
+            email: chamado.tecnico.email,
+          }
+        : null,
+      services: chamado.services.map((s) => ({
+        id: s.service.id,
+        nome: s.service.name,
+        price: s.service.price,
+      })),
+    }));
+
+    return response.json(chamadosFormatados);
+  }
+
+  async create(request: Request, response: Response) {
+    const { services, title, description } = request.body;
+    const clienteId = request.user?.id;
+
+    if (!clienteId) {
+      throw new AppError("Cliente não autenticado", 401);
+    }
+
+    // 1. Calcular preço total
+    const servicos = await prisma.service.findMany({
+      where: { id: { in: services } },
+    });
+    const totalPrice = servicos.reduce((acc, s) => acc + s.price, 0);
+
+    // 2. Escolher admin automaticamente
+    const admins = await prisma.user.findMany({ where: { role: "ADMIN" } });
+    const adminEscolhido = admins[Math.floor(Math.random() * admins.length)];
+
+    if (!adminEscolhido) {
+      throw new AppError("Nenhum admin disponível", 400);
+    }
+
+    // 3. Escolher técnico automaticamente
+    const tecnicos = await prisma.user.findMany({
+      where: { role: "TECNICO" },
+      include: { chamadosTecnico: true, disponibilidades: true },
+    });
+    const disponiveis = tecnicos.filter((t) => t.disponibilidades.length > 0);
+
+    const pool: typeof disponiveis = [];
+    disponiveis.forEach((t) => {
+      const ativos = t.chamadosTecnico.filter(
+        (c) => c.status !== "ENCERRADO",
+      ).length;
+      const peso = Math.max(1, 5 - ativos);
+      for (let i = 0; i < peso; i++) pool.push(t);
+    });
+
+    if (pool.length === 0) {
+      throw new AppError("Nenhum técnico disponível", 400);
+    }
+
+    const tecnicoEscolhido = pool[Math.floor(Math.random() * pool.length)];
+    const disponibilidadeEscolhida = tecnicoEscolhido.disponibilidades[0];
+
+    // 4. Criar chamado já com os IDs automáticos
+    try {
+      const chamado = await prisma.chamado.create({
+        data: {
+          clienteId,
+          adminId: adminEscolhido.id,
+          tecnicoId: tecnicoEscolhido.id,
+          disponibilidadeId: disponibilidadeEscolhida.id,
+          status: "ABERTO",
+          totalPrice,
+          title,
+          description,
+          services: {
+            createMany: {
+              data: services.map((serviceId: string) => ({ serviceId })),
             },
-        })
+          },
+        },
+      });
 
-        const chamadosFormatados = chamados.map(chamado => ({
-            id: chamado.id,
-            title: chamado.title,
-            status: chamado.status,
-            updatedAt: chamado.updatedAt,
-            totalPrice: chamado.totalPrice,
-            cliente: chamado.cliente.name,
-            tecnico: chamado.tecnico.name,
-            services: chamado.services.map(s => ({
-                nome: s.service.name,
-                valor: s.service.price,
-            })),
-        }))
+      return response.status(201).json({
+        id: chamado.id,
+        title: chamado.title,
+        description: chamado.description,
+        status: chamado.status,
+        createdAt: chamado.createdAt,
+        updatedAt: chamado.updatedAt,
+        totalPrice: chamado.totalPrice,
+        cliente: {
+          id: clienteId,
+          name: (await prisma.user.findUnique({ where: { id: clienteId } }))
+            ?.name,
+        },
+        tecnico: { id: tecnicoEscolhido.id, name: tecnicoEscolhido.name },
+        services: servicos.map((s) => ({
+          id: s.id,
+          nome: s.name,
+          price: s.price,
+        })),
+      });
+    } catch (error) {
+      console.error("Erro ao criar chamado", error);
+      return response.status(500).json({ message: "Erro interno", error });
+    }
+  }
 
+  async update(request: Request, response: Response) {
+    const { id } = request.params;
+    const chamadoId = Array.isArray(id) ? id[0] : id;
+    const {
+      tecnicoId,
+      disponibilidadeId,
+      status,
+      services,
+      title,
+      description,
+    } = request.body;
 
-
-        return response.json(chamadosFormatados)
+    // 1. Verificar se o chamado existe
+    const chamado = await prisma.chamado.findUnique({
+      where: { id: chamadoId },
+    });
+    if (!chamado) {
+      throw new AppError("Chamado não encontrado", 404);
     }
 
-    async create(request: Request, response: Response) {
-        const { tecnicoId, disponibilidadeId, adminId, services, title } = request.body
-        const clienteId = request.user?.id
+    // 2. Validar disponibilidade se informada junto com técnico
+    if (tecnicoId && disponibilidadeId) {
+      const disponibilidade = await prisma.disponibilidade.findUnique({
+        where: { id: disponibilidadeId },
+      });
 
-        if (!clienteId) {
-            throw new AppError("Cliente não autenticado", 401)
-        }
-
-        // 1. Validar se a disponibilidade existe e pertence ao técnico
-        const disponibilidade = await prisma.disponibilidade.findUnique({
-            where: { id: disponibilidadeId }
-        })
-
-        if (!disponibilidade || disponibilidade.tecnicoId !== tecnicoId) {
-            throw new AppError("Disponibilidade inválida para esse técnico", 400)
-        }
-
-        // 1.1 Verificar se já existe chamado vinculado a essa disponibilidade
-        const chamadoExistente = await prisma.chamado.findFirst({
-            where: { disponibilidadeId, status: { not: "ENCERRADO" } }
-        })
-
-        if (chamadoExistente) {
-            throw new AppError("Já existe um chamado para esse técnico nesse horário", 400)
-        }
-
-        // 2. Calcular preço total
-        const servicos = await prisma.service.findMany({
-            where: { id: { in: services } }
-        })
-        const totalPrice = servicos.reduce((acc, s) => acc + s.price, 0)
-
-        // 3. Criar chamado
-        const chamado = await prisma.chamado.create({
-            data: {
-                clienteId,
-                adminId,
-                tecnicoId,
-                disponibilidadeId,
-                status: "ABERTO",
-                totalPrice,
-                title,
-                services: {
-                    create: services.map((serviceId: string) => ({ serviceId }))
-                }
-            },
-            include: {
-                disponibilidade: true,
-                tecnico: true,
-                cliente: true,
-                services: { include: { service: true } }
-            }
-        })
-
-        return response.status(201).json(chamado)
+      if (!disponibilidade || disponibilidade.tecnicoId !== tecnicoId) {
+        throw new AppError("Disponibilidade inválida para esse técnico", 400);
+      }
     }
 
-    async update(request: Request, response: Response) {
-        const { id } = request.params
-        const chamadoId = Array.isArray(id) ? id[0] : id
-        const { tecnicoId, disponibilidadeId, status, services, title } = request.body
+    // 3. Atualizar serviços e recalcular preço se necessário
+    let totalPrice = chamado.totalPrice;
+    if (services && Array.isArray(services) && services.length > 0) {
+      const servicos = await prisma.service.findMany({
+        where: { id: { in: services } },
+      });
+      totalPrice = servicos.reduce((acc, s) => acc + s.price, 0);
 
-        // 1. Verificar se o chamado existe
-        const chamado = await prisma.chamado.findUnique({ where: { id: chamadoId } })
-        if (!chamado) {
-            throw new AppError("Chamado não encontrado", 404)
-        }
+      // Remove serviços antigos
+      await prisma.chamadoService.deleteMany({ where: { chamadoId } });
 
-        // 2. Validar disponibilidade se informada junto com técnico
-        if (tecnicoId && disponibilidadeId) {
-            const disponibilidade = await prisma.disponibilidade.findUnique({
-                where: { id: disponibilidadeId }
-            })
-
-            if (!disponibilidade || disponibilidade.tecnicoId !== tecnicoId) {
-                throw new AppError("Disponibilidade inválida para esse técnico", 400)
-            }
-        }
-
-        // 3. Atualizar serviços e recalcular preço se necessário
-        let totalPrice = chamado.totalPrice
-        if (services && Array.isArray(services) && services.length > 0) {
-            const servicos = await prisma.service.findMany({
-                where: { id: { in: services } }
-            })
-            totalPrice = servicos.reduce((acc, s) => acc + s.price, 0)
-
-            // Remove serviços antigos
-            await prisma.chamadoService.deleteMany({ where: { chamadoId } })
-
-            // Adiciona novos serviços
-            await prisma.chamadoService.createMany({
-                data: services.map((serviceId: string) => ({
-                    chamadoId,
-                    serviceId
-                }))
-            })
-        }
-
-        // 4. Atualizar chamado
-        const chamadoAtualizado = await prisma.chamado.update({
-            where: { id: chamadoId },
-            data: {
-                tecnicoId,
-                disponibilidadeId,
-                status,
-                totalPrice,
-                title
-            },
-            include: {
-                disponibilidade: true,
-                tecnico: true,
-                cliente: true,
-                services: { include: { service: true } }
-            }
-        })
-
-        return response.status(200).json(chamadoAtualizado)
+      // Adiciona novos serviços
+      await prisma.chamadoService.createMany({
+        data: services.map((serviceId: string) => ({
+          chamadoId,
+          serviceId,
+        })),
+      });
     }
 
-    async listByTecnico(request: Request, response: Response, next: NextFunction) {
-        try {
+    // 4. Atualizar chamado
+    const chamadoAtualizado = await prisma.chamado.update({
+      where: { id: chamadoId },
+      data: {
+        tecnicoId,
+        disponibilidadeId,
+        status: status ?? chamado.status,
+        totalPrice,
+        title,
+        description,
+      },
+      include: {
+        disponibilidade: true,
+        tecnico: true,
+        cliente: true,
+        services: { include: { service: true } },
+      },
+    });
 
-            const { id } = request.params
-            const tecnicoId = Array.isArray(id) ? id[0] : id
+    return response.status(200).json(chamadoAtualizado);
+  }
 
-            // Verifica se o técnico existe
-            const tecnico = await prisma.user.findUnique({
-                where: { id: tecnicoId }
-            })
+  async listByTecnico(
+    request: Request,
+    response: Response,
+    next: NextFunction,
+  ) {
+    try {
+      const { id } = request.params;
+      const tecnicoId = Array.isArray(id) ? id[0] : id;
 
-            if (!tecnico || tecnico.role !== "TECNICO") {
-                throw new AppError("Técnico não encontrado", 404)
-            }
-            // Busca os chamados atribuídos ao técnico
-            const chamados = await prisma.chamado.findMany({
-                where: { tecnicoId, status: { not: "ENCERRADO" } },
-                include: {
-                    disponibilidade: true,
-                    tecnico: true,
-                    cliente: true,
-                    services: { include: { service: true } }
-                }
-            })
+      // Verifica se o técnico existe
+      const tecnico = await prisma.user.findUnique({
+        where: { id: tecnicoId },
+      });
 
-            return response.status(200).json(chamados)
+      if (!tecnico || tecnico.role !== "TECNICO") {
+        throw new AppError("Técnico não encontrado", 404);
+      }
+      // Busca os chamados atribuídos ao técnico
+      const chamados = await prisma.chamado.findMany({
+        where: { tecnicoId, status: { not: "ENCERRADO" } },
+        include: {
+          disponibilidade: true,
+          tecnico: true,
+          cliente: true,
+          services: { include: { service: true } },
+        },
+      });
 
-        } catch (error) {
-            next(error)
-        }
+      return response.status(200).json(chamados);
+    } catch (error) {
+      next(error);
     }
-
-
+  }
 }
 
-export { ChamadosControllers }
+export { ChamadosControllers };
 
 ```
 
@@ -1793,54 +2148,66 @@ export { DisponibilidadesController }
 ## src\controllers\services-controller.ts
 
 ```ts
-import { prisma } from "@/database/prisma"
-import { Request, Response } from "express"
-import { AppError } from "@/utils/AppError"
+import { prisma } from "@/database/prisma";
+import { Request, Response } from "express";
+import { AppError } from "@/utils/AppError";
 
 class ServicesController {
-    async create(request: Request, response: Response) {
-        const { name, price, active } = request.body
-        const adminId = request.user?.id // pega do usuário logado
+  async create(request: Request, response: Response) {
+    const { name, price, active } = request.body;
+    const adminId = request.user?.id; // pega do usuário logado
 
-        if (!adminId) {
-            throw new AppError("Somente admin pode criar serviços", 403)
-        }
-
-        const service = await prisma.service.create({
-            data: {
-                name,
-                price,
-                active,
-                adminId
-            }
-        })
-
-        return response.status(201).json(service)
+    if (!adminId) {
+      throw new AppError("Somente admin pode criar serviços", 403);
     }
 
-    async index(request: Request, response: Response) {
-        const services = await prisma.service.findMany({
-            where: { active: true } // só lista serviços ativos
-        })
-        return response.json(services)
+    const service = await prisma.service.create({
+      data: {
+        name,
+        price,
+        active,
+        adminId,
+      },
+    });
+
+    return response.status(201).json(service);
+  }
+
+  async index(request: Request, response: Response) {
+    const includeInactive = request.query.includeInactive === "true";
+    const userRole = request.user?.role; // supondo que você tenha o role no objeto user
+
+    let services;
+
+    if (includeInactive) {
+      if (userRole !== "ADMIN") {
+        throw new AppError("Somente admin pode ver serviços inativos", 403);
+      }
+      services = await prisma.service.findMany(); // todos
+    } else {
+      services = await prisma.service.findMany({
+        where: { active: true }, // só ativos
+      });
     }
 
-    async update(request: Request, response: Response) {
-        const { id } = request.params
-        const userId = Array.isArray(id) ? id[0] : id
-        const { name, price, active } = request.body
+    return response.json(services);
+  }
 
-        const service = await prisma.service.update({
-            where: { id: userId },
-            data: { name, price, active }
-        })
+  async update(request: Request, response: Response) {
+    const { id } = request.params;
+    const userId = Array.isArray(id) ? id[0] : id;
+    const { name, price, active } = request.body;
 
-        return response.json(service)
-    }
+    const service = await prisma.service.update({
+      where: { id: userId },
+      data: { name, price, active },
+    });
+
+    return response.json(service);
+  }
 }
 
-export { ServicesController }
-
+export { ServicesController };
 
 ```
 
@@ -1903,66 +2270,124 @@ import path from "path";
 import uploadConfig from "@/configs/upload";
 
 class UserAvatarController {
-    async index(request: Request, response: Response, next: NextFunction) {
-        try {
-            if (!request.user) {
-                return response.status(401).json({ error: "Usuário não autenticado" });
-            }
+  async index(request: Request, response: Response, next: NextFunction) {
+    try {
+      if (!request.user) {
+        return response.status(401).json({ error: "Usuário não autenticado" });
+      }
 
-            const userId = request.user.id;
-            const user = await prisma.user.findUnique({
-                where: { id: userId },
-                select: { avatarUrl: true }
-            });
+      const userId = request.user.id;
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { avatarUrl: true },
+      });
 
-            if (!user || !user.avatarUrl) {
-                return response.status(404).json({ error: "Avatar não encontrado" });
-            }
+      if (!user || !user.avatarUrl) {
+        return response.status(404).json({ error: "Avatar não encontrado" });
+      }
 
-            // Caminho completo do arquivo
-            const filePath = path.resolve(uploadConfig.UPLOADS_FOLDER, user.avatarUrl);
+      // Caminho completo do arquivo
+      const filePath = path.resolve(
+        uploadConfig.UPLOADS_FOLDER,
+        user.avatarUrl,
+      );
 
-            // Envia o arquivo diretamente
-            return response.sendFile(filePath);
-        } catch (error) {
-            console.log(error);
-            next(error);
-        }
+      // Envia o arquivo diretamente
+      return response.sendFile(filePath);
+    } catch (error) {
+      console.log(error);
+      next(error);
     }
-    async update(request: Request, response: Response, next: NextFunction) {
-        try {
+  }
+  async update(request: Request, response: Response, next: NextFunction) {
+    try {
+      const diskStorage = new DiskStorage();
 
-            const diskStorage = new DiskStorage();
+      if (!request.user) {
+        return response.status(401).json({ error: "Usuário não autenticado" });
+      }
+      const userId = request.user.id; // vem do middleware de autenticação
 
-            if (!request.user) {
-                return response.status(401).json({ error: "Usuário não autenticado" });
-            }
-            const userId = request.user.id; // vem do middleware de autenticação
+      if (!request.file) {
+        return response.status(400).json({ error: "Nenhum arquivo enviado" });
+      }
 
-            if (!request.file) {
-                return response.status(400).json({ error: "Nenhum arquivo enviado" });
-            }
+      //Busca o arquivo antigo antes de substituir
+      const user = await prisma.user.findUnique({
+        where: {
+          id: userId,
+        },
+        select: {
+          avatarUrl: true,
+        },
+      });
+      // Salva o novo arquivo
+      const filename = await diskStorage.saveFile(request.file.filename);
 
-            // Salva o arquivo
-            const filename = await diskStorage.saveFile(request.file.filename);
+      // Atualiza o banco com novo avatar
+      await prisma.user.update({
+        where: { id: userId },
+        data: { avatarUrl: filename },
+      });
 
-            // Atualiza o usuário no banco
-            const user = await prisma.user.update({
-                where: { id: userId },
-                data: { avatarUrl: filename }
-            });
+      // Deleta o avatar antigo
+      if (user?.avatarUrl) {
+        await diskStorage.deleteFile(user.avatarUrl, "upload");
+      }
 
-            return response.status(200).json({
-                message: "Avatar atualizado com sucesso!",
-                avatarUrl: user.avatarUrl
-            });
-
-        } catch (error) {
-            console.log(error)
-            next(error)
-        }
-
+      return response.status(200).json({ avatarUrl: filename });
+    } catch (error) {
+      console.log(error);
+      next(error);
     }
+  }
+  async delete(request: Request, response: Response, next: NextFunction) {
+    try {
+      const diskStorage = new DiskStorage();
+
+      if (!request.user) {
+        return response.status(401).json({
+          error: "Usuário não autenticado",
+        });
+      }
+
+      const userId = request.user.id;
+
+      // Busca avatar atual
+      const user = await prisma.user.findUnique({
+        where: {
+          id: userId,
+        },
+        select: {
+          avatarUrl: true,
+        },
+      });
+
+      if (!user?.avatarUrl) {
+        return response.status(404).json({
+          error: "Usuário não possui avatar",
+        });
+      }
+
+      // Remove arquivo físico
+      await diskStorage.deleteFile(user.avatarUrl, "upload");
+
+      // Remove referência no banco
+      const updatedUser = await prisma.user.update({
+        where: {
+          id: userId,
+        },
+        data: {
+          avatarUrl: null,
+        },
+      });
+
+      return response.status(200).json(updatedUser);
+    } catch (error) {
+      console.log(error);
+      next(error);
+    }
+  }
 }
 
 export { UserAvatarController };
@@ -1972,239 +2397,289 @@ export { UserAvatarController };
 ## src\controllers\users-controllers.ts
 
 ```ts
-import { authConfig } from "@/configs/auth"
-import { prisma } from "@/database/prisma"
-import { AppError } from "@/utils/AppError"
-import { hash } from "bcrypt"
-import { Request, Response, NextFunction } from "express"
-import { SignOptions } from "jsonwebtoken"
-import jwt from "jsonwebtoken"
-import z from "zod"
+import { authConfig } from "@/configs/auth";
+import { prisma } from "@/database/prisma";
+import { AppError } from "@/utils/AppError";
+import { hash } from "bcrypt";
+import { Request, Response, NextFunction } from "express";
+import { SignOptions } from "jsonwebtoken";
+import jwt from "jsonwebtoken";
+import z from "zod";
 
 class UserController {
-    async index(request: Request, response: Response, next: NextFunction) {
-        const users = await prisma.user.findMany({
-            select: {
-                id: true,
-                name: true,
-                email: true,
-                avatarUrl: true,
-                role: true,
-                createdAt: true,
-                updatedAt: true,
-            },
+  async index(request: Request, response: Response, next: NextFunction) {
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        avatarUrl: true,
+        role: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return response.status(200).json(users);
+  }
+
+  async create(request: Request, response: Response, next: NextFunction) {
+    try {
+      const bodySchema = z.object({
+        name: z
+          .string()
+          .trim()
+          .min(3, { message: "O nome deve ter pelo menos 3 caracteres." }),
+        email: z.string().email(),
+        password: z.string().min(6),
+        role: z.enum(["ADMIN", "TECNICO", "CLIENTE"]),
+        horarios: z.array(z.string()).optional(), // <-- adiciona horários opcionais
+      });
+
+      const { name, email, password, role, horarios } = bodySchema.parse(
+        request.body,
+      );
+
+      const userWithSameEmail = await prisma.user.findUnique({
+        where: { email },
+      });
+      if (userWithSameEmail) throw new AppError("Email já existe", 400);
+
+      const hashedPassword = await hash(password, 8);
+
+      const defaultHours = [
+        "08:00",
+        "09:00",
+        "10:00",
+        "11:00",
+        "14:00",
+        "15:00",
+        "16:00",
+        "17:00",
+      ];
+
+      const user = await prisma.user.create({
+        data: { name, email, password: hashedPassword, role },
+      });
+
+      // Popula a tabela Disponibilidade para técnicos
+      if (role === "TECNICO") {
+        const horasParaSalvar =
+          horarios && horarios.length > 0 ? horarios : defaultHours;
+
+        await prisma.disponibilidade.createMany({
+          data: horasParaSalvar.map((horario) => ({
+            horario,
+            tecnicoId: user.id,
+          })),
+        });
+      }
+
+      // Gera token JWT
+      const { secret, expiresIn } = authConfig.jwt;
+      const options: SignOptions = {
+        subject: String(user.id),
+        expiresIn: expiresIn as any,
+      };
+      const token = jwt.sign({ role: user.role }, secret, options);
+
+      const { password: _, ...userWithoutPassword } = user;
+      return response.status(201).json({ user: userWithoutPassword, token });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async update(request: Request, response: Response) {
+    const { id } = request.params;
+    const userId = Array.isArray(id) ? id[0] : id;
+
+    const bodySchema = z.object({
+      name: z.string().trim().min(3).optional(),
+      email: z.string().email().optional(),
+      password: z.string().min(6).optional(),
+      avatarUrl: z.string().url().optional(),
+      role: z.enum(["ADMIN", "TECNICO", "CLIENTE"]).optional(),
+      horarios: z.array(z.string()).optional(), // ✅ adiciona horários
+    });
+
+    const data = bodySchema.parse(request.body);
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError("Usuário não encontrado", 404);
+
+    const { horarios, ...userData } = data;
+
+    // Atualiza dados básicos
+    if (userData.password) {
+      userData.password = await hash(userData.password, 8);
+    }
+
+    const updatedUser = await prisma.$transaction(async (tx) => {
+      if (user.role === "TECNICO" && horarios) {
+        await tx.disponibilidade.deleteMany({ where: { tecnicoId: userId } });
+        await tx.disponibilidade.createMany({
+          data: horarios.map((horario) => ({ horario, tecnicoId: userId })),
+        });
+      }
+
+      return tx.user.update({
+        where: { id: userId },
+        data: { ...userData },
+        include: { disponibilidades: true },
+      });
+    });
+
+    const { password, ...userWithoutPassword } = user;
+    return response.status(200).json(userWithoutPassword);
+  }
+
+  async listAdmins(request: Request, response: Response) {
+    // Busca todos os usuários com role ADMIN
+    const admins = await prisma.user.findMany({
+      where: { role: "ADMIN" },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return response.status(200).json(admins);
+  }
+
+  async listTecnicos(request: Request, response: Response, next: NextFunction) {
+    try {
+      const tecnicos = await prisma.user.findMany({
+        where: { role: "TECNICO" },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          disponibilidades: {
+            select: { horario: true },
+          },
+        },
+      });
+
+      return response.status(200).json(tecnicos);
+    } catch (error) {
+      console.error("Erro ao listar técnicos:", error);
+      return response.status(500).json({ message: "Erro ao listar técnicos" });
+    }
+  }
+
+  async show(request: Request, response: Response, next: NextFunction) {
+    try {
+      const { id } = request.params;
+      const userId = Array.isArray(id) ? id[0] : id;
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          avatarUrl: true,
+          role: true,
+          disponibilidades: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      if (!user) {
+        throw new AppError("Usuário não encontrado", 404);
+      }
+
+      return response.status(200).json(user);
+    } catch (error) {
+      next(error); // 🔹 garante que o servidor não caia
+    }
+  }
+
+  async listClientes(request: Request, response: Response) {
+    const clientes = await prisma.user.findMany({
+      where: { role: "CLIENTE" },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return response.status(200).json(clientes);
+  }
+
+  async delete(request: Request, response: Response, next: NextFunction) {
+    try {
+      const { id } = request.params;
+      const userId = Array.isArray(id) ? id[0] : id;
+
+      if (request.user?.role !== "ADMIN") {
+        throw new AppError("Você não tem permissão para excluir usuários", 403);
+      }
+
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) {
+        throw new AppError("Usuário não encontrado", 404);
+      }
+
+      // Agora permite excluir ADMIN, TECNICO e CLIENTE
+      if (user.role === "ADMIN") {
+        await prisma.user.delete({ where: { id: userId } });
+        return response
+          .status(200)
+          .json({ message: "Administrador excluído com sucesso" });
+      }
+
+      if (user.role === "TECNICO") {
+        // Verifica se existem chamados atribuídos ao técnico
+        const chamadosDoTecnico = await prisma.chamado.findMany({
+          where: { tecnicoId: userId },
         });
 
-        return response.status(200).json(users);
-    }
-
-    async create(request: Request, response: Response, next: NextFunction) {
-        try {
-            const bodySchema = z.object({
-                name: z.string().trim().min(3, { message: "O nome deve ter pelo menos 3 caracteres." }),
-                email: z.string().email(),
-                password: z.string().min(6),
-                role: z.enum(["ADMIN", "TECNICO", "CLIENTE"])
-            });
-
-            const { name, email, password, role } = bodySchema.parse(request.body);
-
-            const userWithSameEmail = await prisma.user.findUnique({ where: { email } });
-            if (userWithSameEmail) {
-                throw new AppError("Email já existe", 400);
-            }
-
-            const hashedPassword = await hash(password, 8);
-
-            const defaultHours = ["08:00", "09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"];
-
-            const user = await prisma.user.create({
-                data: { name, email, password: hashedPassword, role }
-            });
-
-            // Popula a tabela Disponibilidade para técnicos
-            if (role === "TECNICO") {
-                await prisma.disponibilidade.createMany({
-                    data: defaultHours.map(horario => ({
-                        horario,
-                        tecnicoId: user.id
-                    }))
-                });
-            }
-
-            // 🔐 Gera token JWT padronizado
-            const { secret, expiresIn } = authConfig.jwt;
-            const options: SignOptions = {
-                subject: String(user.id),
-                expiresIn: expiresIn as any // ✅ Corrige o tipo para evitar erro TS
-            };
-            const token = jwt.sign({ role: user.role }, secret, options);
-
-            const { password: _, ...userWithoutPassword } = user;
-
-            return response.status(201).json({ user: userWithoutPassword, token });
-        } catch (error) {
-            console.log("Erro no create:", error)
-            next(error);
-        }
-    }
-
-    async update(request: Request, response: Response) {
-        const { id } = request.params
-
-        const userId = Array.isArray(id) ? id[0] : id
-
-        // Schema com todos os campos opcionais
-        const bodySchema = z.object({
-            name: z.string().trim().min(3, { message: "O nome deve ter pelo menos 3 caracteres." }).optional(),
-            email: z.string().email().optional(),
-            password: z.string().min(6).optional(),
-            avatarUrl: z.string().url().optional(),
-            role: z.enum(["ADMIN", "TECNICO", "CLIENTE"]).optional()
-        })
-
-        const data = bodySchema.parse(request.body)
-
-        if (request.user?.role === "ADMIN") {
-            // ADMIN pode atualizar qualquer usuário
-        } else if (request.user?.role === "TECNICO") {
-            // TECNICO só pode atualizar o próprio perfil
-            if (request.user.id !== userId) {
-                throw new AppError("Você não tem permissão para atualizar outro usuário", 403);
-            }
-        } else {
-            // CLIENTE só pode atualizar o próprio perfil também
-            if (request.user?.id !== userId) {
-                throw new AppError("Você não tem permissão para atualizar outro usuário", 403);
-            }
+        if (chamadosDoTecnico.length > 0) {
+          throw new AppError(
+            "Este técnico possui chamados atribuídos. Reatribua os chamados a outro técnico antes de excluir.",
+            400,
+          );
         }
 
-        const user = await prisma.user.findUnique({ where: { id: userId } })
-        if (!user) {
-            throw new AppError("Usuário não encontrado", 404)
-        }
+        // Se não houver chamados, pode excluir as disponibilidades e o usuário
+        await prisma.disponibilidade.deleteMany({
+          where: { tecnicoId: userId },
+        });
+        await prisma.user.delete({ where: { id: userId } });
 
-        if (data.password) {
-            data.password = await hash(data.password, 8)
-        }
+        return response
+          .status(200)
+          .json({ message: "Técnico excluído com sucesso" });
+      }
 
-        const updatedUser = await prisma.user.update({
-            where: { id: userId },
-            data
-        })
-
-        const { password, ...userWithoutPassword } = updatedUser
-
-        return response.status(200).json(userWithoutPassword)
-
+      if (user.role === "CLIENTE") {
+        await prisma.chamadoService.deleteMany({
+          where: { chamado: { clienteId: userId } },
+        });
+        await prisma.user.delete({ where: { id: userId } });
+        return response
+          .status(200)
+          .json({ message: "Cliente excluído com sucesso" });
+      }
+      console.log("=== Role recebido do banco: ==== ", user.role);
+      throw new AppError("Tipo de usuário não suportado para exclusão", 400);
+    } catch (error) {
+      next(error);
     }
-
-    async listAdmins(request: Request, response: Response) {
-        // Busca todos os usuários com role ADMIN
-        const admins = await prisma.user.findMany({
-            where: { role: "ADMIN" },
-            select: {
-                id: true,
-                name: true,
-                email: true,
-                createdAt: true,
-                updatedAt: true
-            }
-        })
-
-        return response.status(200).json(admins)
-    }
-
-    async listTecnicos(request: Request, response: Response, next: NextFunction) {
-        try {
-            const tecnicos = await prisma.user.findMany({
-                where: { role: "TECNICO" },
-                select: {
-                    id: true,
-                    name: true,
-                    email: true,
-                    createdAt: true,
-                    updatedAt: true
-                }
-            })
-
-            return response.status(200).json(tecnicos)
-
-        } catch (error) {
-            next(error)
-        }
-    }
-
-    async listClientes(request: Request, response: Response) {
-        const clientes = await prisma.user.findMany({
-            where: { role: "CLIENTE" },
-            select: {
-                id: true,
-                name: true,
-                email: true,
-                createdAt: true,
-                updatedAt: true
-            }
-        })
-
-        return response.status(200).json(clientes)
-    }
-
-    async delete(request: Request, response: Response, next: NextFunction) {
-        try {
-            const { id } = request.params
-            const userId = Array.isArray(id) ? id[0] : id
-
-            if (request.user?.role !== "ADMIN") {
-                throw new AppError("Você não tem permissão para excluir usuários", 403)
-            }
-
-            const user = await prisma.user.findUnique({ where: { id: userId } })
-            if (!user) {
-                throw new AppError("Usuário não encontrado", 404)
-            }
-
-            // Agora permite excluir ADMIN, TECNICO e CLIENTE
-            if (user.role === "ADMIN") {
-                await prisma.user.delete({ where: { id: userId } })
-                return response.status(200).json({ message: "Administrador excluído com sucesso" })
-            }
-
-            if (user.role === "TECNICO") {
-                // Verifica se existem chamados atribuídos ao técnico
-                const chamadosDoTecnico = await prisma.chamado.findMany({
-                    where: { tecnicoId: userId }
-                })
-
-                if (chamadosDoTecnico.length > 0) {
-                    throw new AppError(
-                        "Este técnico possui chamados atribuídos. Reatribua os chamados a outro técnico antes de excluir.",
-                        400
-                    )
-                }
-
-                // Se não houver chamados, pode excluir as disponibilidades e o usuário
-                await prisma.disponibilidade.deleteMany({ where: { tecnicoId: userId } })
-                await prisma.user.delete({ where: { id: userId } })
-
-                return response.status(200).json({ message: "Técnico excluído com sucesso" })
-            }
-
-
-            if (user.role === "CLIENTE") {
-                await prisma.chamadoService.deleteMany({ where: { chamado: { clienteId: userId } } })
-                await prisma.user.delete({ where: { id: userId } })
-                return response.status(200).json({ message: "Cliente excluído com sucesso" })
-            }
-            console.log("Role recebido do banco:", user.role)
-            throw new AppError("Tipo de usuário não suportado para exclusão", 400)
-        } catch (error) {
-            next(error)
-        }
-
-    }
+  }
 }
-export { UserController }
+export { UserController };
+
 ```
 
 ## src\database\prisma.ts
@@ -2353,36 +2828,39 @@ import uploadConfig from "@/configs/upload";
 import fs from "node:fs";
 import path from "node:path";
 
-
 class DiskStorage {
-    async saveFile(file: string) {
-        const tmpPath = path.resolve(uploadConfig.TMP_FOLDER, file)
-        const destPath = path.resolve(uploadConfig.UPLOADS_FOLDER, file)
-        try {
-            await fs.promises.access(tmpPath)
-        } catch (error) {
-            console.log(error)
-            throw new Error(`Arquivo não encontrado: ${tmpPath}`)
-        }
-        await fs.promises.mkdir(uploadConfig.UPLOADS_FOLDER, { recursive: true })
-        await fs.promises.rename(tmpPath, destPath)
-        return file
+  async saveFile(file: string) {
+    const tmpPath = path.resolve(uploadConfig.TMP_FOLDER, file);
+    const destPath = path.resolve(uploadConfig.UPLOADS_FOLDER, file);
+    try {
+      await fs.promises.access(tmpPath);
+    } catch (error) {
+      console.log(error);
+      throw new Error(`Arquivo não encontrado: ${tmpPath}`);
     }
+    await fs.promises.mkdir(uploadConfig.UPLOADS_FOLDER, { recursive: true });
+    await fs.promises.rename(tmpPath, destPath);
+    return file;
+  }
 
-    async deleteFile(file: string, type: "tmp" | "upload") {
-        const pathFile = type === "tmp" ? uploadConfig.TMP_FOLDER : uploadConfig.UPLOADS_FOLDER
-        const filePath = path.resolve(pathFile, file)
-        try {
-            await fs.promises.stat(filePath)
-        } catch (error) {
-            console.log(error)
-            throw new Error(`arquivo não encontrado: ${filePath}`)
-        }
-        await fs.promises.unlink(filePath)
+  async deleteFile(file: string, type: "tmp" | "upload") {
+    const folder =
+      type === "tmp" ? uploadConfig.TMP_FOLDER : uploadConfig.UPLOADS_FOLDER;
+
+    const filePath = path.resolve(folder, file);
+
+    try {
+      await fs.promises.unlink(filePath);
+    } catch (error: any) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
     }
+  }
 }
 
-export { DiskStorage }
+export { DiskStorage };
+
 ```
 
 ## src\routes\chamados-routes.ts
@@ -2535,15 +3013,21 @@ const userAvatarController = new UserAvatarController();
 const upload = multer(uploadConfig.MULTER);
 
 userAvatarRoutes.post(
-    "/avatar",
-    ensureAuthenticated,
-    upload.single("file"),
-    userAvatarController.update
+  "/avatar",
+  ensureAuthenticated,
+  upload.single("file"),
+  userAvatarController.update,
 );
 userAvatarRoutes.get(
-    "/avatar",
-    ensureAuthenticated,
-    userAvatarController.index
+  "/avatar",
+  ensureAuthenticated,
+  userAvatarController.index,
+);
+
+userAvatarRoutes.delete(
+  "/avatar",
+  ensureAuthenticated,
+  userAvatarController.delete,
 );
 
 export { userAvatarRoutes };
@@ -2553,82 +3037,110 @@ export { userAvatarRoutes };
 ## src\routes\users-routes.ts
 
 ```ts
-import { Router } from "express"
-import { UserController } from "@/controllers/users-controllers"
-import { ensureAuthenticated } from "@/middleware/ensure-authenticated"
-import { verifyUserAuthorization } from "@/middleware/verifyUserAuthorization"
-import { asyncHandler } from "@/utils/asyncHandler"
-import { prisma } from "@/database/prisma"
+import { Router } from "express";
+import { UserController } from "@/controllers/users-controllers";
+import { ensureAuthenticated } from "@/middleware/ensure-authenticated";
+import { verifyUserAuthorization } from "@/middleware/verifyUserAuthorization";
+import { asyncHandler } from "@/utils/asyncHandler";
+import { prisma } from "@/database/prisma";
 
-const usersRoutes = Router()
-const userController = new UserController()
+const usersRoutes = Router();
+const userController = new UserController();
+
+/* -------------------------
+   🔹 ROTAS DE LISTAGEM
+------------------------- */
 
 // Listar todos os usuários (somente ADMIN)
-usersRoutes.get("/", asyncHandler(async (req, res, next) => {
+usersRoutes.get(
+  "/",
+  asyncHandler(async (req, res, next) => {
     ensureAuthenticated(req, res, () => {
-        verifyUserAuthorization(["ADMIN"])(req, res, async () => {
-            await userController.index(req, res, next)
-        })
-    })
-}))
+      verifyUserAuthorization(["ADMIN"])(req, res, async () => {
+        await userController.index(req, res, next);
+      });
+    });
+  }),
+);
+
+// Listar todos os administradores
+usersRoutes.get("/admins", ensureAuthenticated, userController.listAdmins);
+
+// Listar todos os técnicos
+usersRoutes.get("/tecnicos", ensureAuthenticated, userController.listTecnicos);
+
+// Listar todos os clientes
+usersRoutes.get("/clientes", ensureAuthenticated, userController.listClientes);
+
+/* -------------------------
+   🔹 ROTAS DE CONSULTA INDIVIDUAL
+------------------------- */
+
+// Buscar um único usuário
+usersRoutes.get(
+  "/:id",
+  asyncHandler(async (req, res, next) => {
+    ensureAuthenticated(req, res, async () => {
+      await userController.show(req, res, next);
+    });
+  }),
+);
+
+// Atualizar usuário (Admin pode atualizar qualquer um, Técnico/Cliente só o próprio)
+usersRoutes.patch(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    ensureAuthenticated(req, res, async () => {
+      await userController.update(req, res);
+    });
+  }),
+);
+
+// Excluir usuário (Admin pode excluir Admin, Técnico ou Cliente)
+usersRoutes.delete(
+  "/:id",
+  asyncHandler(async (req, res, next) => {
+    ensureAuthenticated(req, res, () => {
+      verifyUserAuthorization(["ADMIN"])(req, res, async () => {
+        await userController.delete(req, res, next);
+      });
+    });
+  }),
+);
+
+/* -------------------------
+   🔹 ROTAS DE CRIAÇÃO
+------------------------- */
 
 // Criar usuário (Admin, Técnico ou Cliente)
-usersRoutes.post("/", asyncHandler(async (req, res, next) => {
+usersRoutes.post(
+  "/",
+  asyncHandler(async (req, res, next) => {
     const { role } = req.body;
 
     // Permite cadastro público de CLIENTE
     if (role === "CLIENTE") {
-        return userController.create(req, res, next);
+      return userController.create(req, res, next);
     }
 
     // Mantém regra para ADMIN e TECNICO
-    const adminExists = await prisma.user.findFirst({ where: { role: "ADMIN" } });
+    const adminExists = await prisma.user.findFirst({
+      where: { role: "ADMIN" },
+    });
+
     if (!adminExists && role === "ADMIN") {
-        return userController.create(req, res, next);
+      return userController.create(req, res, next);
     }
 
     ensureAuthenticated(req, res, () => {
-        verifyUserAuthorization(["ADMIN"])(req, res, async () => {
-            await userController.create(req, res, next);
-        });
+      verifyUserAuthorization(["ADMIN"])(req, res, async () => {
+        await userController.create(req, res, next);
+      });
     });
-}));
+  }),
+);
 
-
-// Atualizar usuário (Admin pode atualizar qualquer um, Técnico/Cliente só o próprio)
-usersRoutes.patch("/:id", asyncHandler(async (req, res) => {
-    ensureAuthenticated(req, res, async () => {
-        await userController.update(req, res)
-    })
-}))
-
-// Listar todos os administradores
-usersRoutes.get("/admins",
-    ensureAuthenticated, // só usuários logados podem acessar
-    userController.listAdmins
-)
-
-// Listar todos os técnicos
-usersRoutes.get("/tecnicos",
-    ensureAuthenticated,
-    userController.listTecnicos
-)
-// Listar todos os clientes
-usersRoutes.get("/clientes",
-    ensureAuthenticated,
-    userController.listClientes
-)
-
-// Excluir usuário (Admin pode excluir Admin, Técnico ou Cliente)
-usersRoutes.delete("/:id", asyncHandler(async (req, res, next) => {
-    ensureAuthenticated(req, res, () => {
-        verifyUserAuthorization(["ADMIN"])(req, res, async () => {
-            await userController.delete(req, res, next)
-        })
-    })
-}))
-
-export { usersRoutes }
+export { usersRoutes };
 
 ```
 

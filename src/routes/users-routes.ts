@@ -49,6 +49,14 @@ usersRoutes.get(
 
 // Atualizar usuário (Admin pode atualizar qualquer um, Técnico/Cliente só o próprio)
 usersRoutes.patch(
+  "/:id/password",
+  ensureAuthenticated,
+  asyncHandler(async (req, res, next) => {
+    await userController.updatePassword(req, res, next);
+  }),
+);
+
+usersRoutes.patch(
   "/:id",
   asyncHandler(async (req, res) => {
     ensureAuthenticated(req, res, async () => {
